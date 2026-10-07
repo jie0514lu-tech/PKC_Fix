@@ -42,7 +42,22 @@ jobs:
         fi
         echo "dylib size: $(du -h "$DYLIB" | cut -f1)"
         ldid -S "$DYLIB"
-        echo "已签名"
+        echo "已签名 PKC60sFix"
+
+        # 准备 libsubstrate.dylib（原始 PKC 依赖它）
+        # 从 Theos 的 CydiaSubstrate.framework 复制并命名为 libsubstrate.dylib
+        CS_PATH=$(find /opt/theos -name "CydiaSubstrate" -type f 2>/dev/null | head -1)
+        echo "CydiaSubstrate path: $CS_PATH"
+        if [ -n "$CS_PATH" ]; then
+          cp "$CS_PATH" .theos/libsubstrate.dylib
+          # 更改 install name 为 @rpath/libsubstrate.dylib
+          install_name_tool -id "@rpath/libsubstrate.dylib" .theos/libsubstrate.dylib 2>/dev/null || true
+          ldid -S .theos/libsubstrate.dylib
+          echo "已创建 libsubstrate.dylib"
+          ls -la .theos/libsubstrate.dylib
+        else
+          echo "WARNING: CydiaSubstrate not found, libsubstrate.dylib 未创建"
+        fi
 
     - name: Extract original deb and merge
       run: |
@@ -102,7 +117,15 @@ jobs:
         LIB_DIR="pkg/var/jb/Library/MobileSubstrate/DynamicLibraries"
         cp "$DYLIB" "$LIB_DIR/PKC60sFix.dylib"
         cp ../PKC60sFix.plist "$LIB_DIR/PKC60sFix.plist"
-        
+
+        # 复制 libsubstrate.dylib（原始 PKC 依赖）
+        if [ -f ../.theos/libsubstrate.dylib ]; then
+          cp ../.theos/libsubstrate.dylib "$LIB_DIR/libsubstrate.dylib"
+          echo "已添加 libsubstrate.dylib"
+        else
+          echo "WARNING: libsubstrate.dylib 不存在，原始 PKC 可能无法启动"
+        fi
+
         echo "=== 合并后 pkg 内容 ==="
         find pkg -type f -exec ls -la {} \;
         
