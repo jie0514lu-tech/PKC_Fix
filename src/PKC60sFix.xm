@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
+#import <objc/message.h>
 
 // PKC 60秒新闻修复插件
 // 仅修复两个问题，不修改 PKC 其他任何功能：
@@ -347,66 +348,65 @@ static NSArray *PKC60sGetAPIList(void) {
 %hook WeixinContentLogicController
 
 // 添加/替换 AddMsg:MsgWrap: 方法
+// 使用 objc_msgSend / performSelector 调用微信内部方法，避免编译器报错
+// （编译器没有微信类的头文件，直接用 [] 语法会报 "no known method"）
 - (void)AddMsg:(id)msgWrap MsgWrap:(id)msgWrap2 {
     @try {
         // 方式1：通过 CMessageMgr 发送（最可靠）
         Class CMessageMgrClass = NSClassFromString(@"CMessageMgr");
         if (CMessageMgrClass) {
-            // 获取 CMessageMgr 单例
             id cMessageMgr = nil;
             @try {
                 if ([CMessageMgrClass respondsToSelector:@selector(sharedInstance)]) {
-                    cMessageMgr = [CMessageMgrClass sharedInstance];
+                    cMessageMgr = [CMessageMgrClass performSelector:@selector(sharedInstance)];
                 }
             } @catch (NSException *e) {
                 NSLog(@"[PKC60sFix] CMessageMgr sharedInstance failed: %@", e);
             }
-            
+
             // 备用：通过 MMServiceCenter 获取
             if (!cMessageMgr) {
                 @try {
                     Class MMServiceCenterClass = NSClassFromString(@"MMServiceCenter");
                     if (MMServiceCenterClass && [MMServiceCenterClass respondsToSelector:@selector(defaultCenter)]) {
-                        id center = [MMServiceCenterClass defaultCenter];
-                        if ([center respondsToSelector:@selector(getService:)]) {
-                            cMessageMgr = [center getService:CMessageMgrClass];
+                        id center = [MMServiceCenterClass performSelector:@selector(defaultCenter)];
+                        if (center && [center respondsToSelector:@selector(getService:)]) {
+                            cMessageMgr = [center performSelector:@selector(getService:) withObject:CMessageMgrClass];
                         }
                     }
                 } @catch (NSException *e) {
                     NSLog(@"[PKC60sFix] MMServiceCenter getService failed: %@", e);
                 }
             }
-            
+
             if (cMessageMgr && [cMessageMgr respondsToSelector:@selector(AddMsg:MsgWrap:)]) {
-                // 微信 8.0.78/79 中 CMessageMgr AddMsg:MsgWrap: 的第二参数传 nil
-                [cMessageMgr AddMsg:msgWrap MsgWrap:(msgWrap2 ?: nil)];
+                // 用 objc_msgSend 调用 AddMsg:MsgWrap:（第二参数传 nil）
+                ((void(*)(id, SEL, id, id))objc_msgSend)(cMessageMgr, @selector(AddMsg:MsgWrap:), msgWrap, nil);
                 return;
             }
         }
-        
-        // 方式2：通过父类 BaseMsgContentLogicController 的 OnAddMsg:MsgWrap: 发送
+
+        // 方式2：通过父类 OnAddMsg:MsgWrap: 发送
         if ([self respondsToSelector:@selector(OnAddMsg:MsgWrap:)]) {
-            [self OnAddMsg:msgWrap MsgWrap:(msgWrap2 ?: nil)];
+            ((void(*)(id, SEL, id, id))objc_msgSend)(self, @selector(OnAddMsg:MsgWrap:), msgWrap, nil);
             return;
         }
-        
-        // 方式3：通过 SendTextMessage 发送（仅当内容是文本时）
+
+        // 方式3：通过 SendTextMessage 发送
         @try {
-            if (msgWrap && [msgWrap respondsToSelector:@selector(m_nsContent)]) {
-                NSString *content = [msgWrap valueForKey:@"m_nsContent"];
-                NSString *toUsr = [msgWrap valueForKey:@"m_nsToUsr"];
-                if (content.length > 0 && toUsr.length > 0) {
-                    // 使用新版 SendTextMessage:replyingMessage:isPasted:
-                    if ([self respondsToSelector:@selector(SendTextMessage:replyingMessage:isPasted:)]) {
-                        [self SendTextMessage:content replyingMessage:nil isPasted:NO];
-                        return;
-                    }
+            NSString *content = [msgWrap valueForKey:@"m_nsContent"];
+            NSString *toUsr = [msgWrap valueForKey:@"m_nsToUsr"];
+            if (content.length > 0 && toUsr.length > 0) {
+                SEL sendSel = NSSelectorFromString(@"SendTextMessage:replyingMessage:isPasted:");
+                if ([self respondsToSelector:sendSel]) {
+                    ((void(*)(id, SEL, id, id, BOOL))objc_msgSend)(self, sendSel, content, nil, NO);
+                    return;
                 }
             }
         } @catch (NSException *e) {
             NSLog(@"[PKC60sFix] SendTextMessage fallback failed: %@", e);
         }
-        
+
         NSLog(@"[PKC60sFix] All message sending methods failed");
     } @catch (NSException *e) {
         NSLog(@"[PKC60sFix] Error in AddMsg:MsgWrap: %@", e);
