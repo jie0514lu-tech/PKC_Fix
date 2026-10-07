@@ -334,25 +334,16 @@ static NSArray *PKC60sGetAPIList(void) {
 %end
 
 #pragma mark - 修复消息发送方式（微信 8.0.78/79 兼容性）
-
-// 微信 8.0.78/79 中，WeixinContentLogicController 不再有 AddMsg:MsgWrap: 方法
-// （父类 BaseMsgContentLogicController 只有 OnAddMsg:MsgWrap:）
-// PKC 调用 [WeixinContentLogicController AddMsg:MsgWrap:] 发送消息时，
-// 由于方法不存在，导致消息发送失败（空白/乱码）或闪退。
 //
-// 修复：为 WeixinContentLogicController 添加 AddMsg:MsgWrap: 方法，
-// 转发到 CMessageMgr AddMsg:MsgWrap:（该方法在微信 8.0.78/79 中存在）
+// 关键：只在 WeixinContentLogicController 没有 AddMsg:MsgWrap: 方法时才添加
+// 如果微信已自带此方法，完全不干预，避免影响正常消息/语音发送
 //
-// 注意：此修复不影响 PKC 其他功能，只是让 PKC 的消息发送在新版微信中正常工作
+// 用 class_addMethod 在 %ctor 中检查并添加，不会覆盖已有方法
 
-%hook WeixinContentLogicController
-
-// 添加/替换 AddMsg:MsgWrap: 方法
-// 使用 objc_msgSend / performSelector 调用微信内部方法，避免编译器报错
-// （编译器没有微信类的头文件，直接用 [] 语法会报 "no known method"）
-- (void)AddMsg:(id)msgWrap MsgWrap:(id)msgWrap2 {
+// 转发实现函数（IMP）
+static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
     @try {
-        // 方式1：通过 CMessageMgr 发送（最可靠）
+        // 方式1：通过 CMessageMgr 发送
         Class CMessageMgrClass = NSClassFromString(@"CMessageMgr");
         if (CMessageMgrClass) {
             id cMessageMgr = nil;
@@ -360,11 +351,8 @@ static NSArray *PKC60sGetAPIList(void) {
                 if ([CMessageMgrClass respondsToSelector:@selector(sharedInstance)]) {
                     cMessageMgr = [CMessageMgrClass performSelector:@selector(sharedInstance)];
                 }
-            } @catch (NSException *e) {
-                NSLog(@"[PKC60sFix] CMessageMgr sharedInstance failed: %@", e);
-            }
+            } @catch (NSException *e) {}
 
-            // 备用：通过 MMServiceCenter 获取
             if (!cMessageMgr) {
                 @try {
                     Class MMServiceCenterClass = NSClassFromString(@"MMServiceCenter");
@@ -374,26 +362,23 @@ static NSArray *PKC60sGetAPIList(void) {
                             cMessageMgr = [center performSelector:@selector(getService:) withObject:CMessageMgrClass];
                         }
                     }
-                } @catch (NSException *e) {
-                    NSLog(@"[PKC60sFix] MMServiceCenter getService failed: %@", e);
-                }
+                } @catch (NSException *e) {}
             }
 
             if (cMessageMgr && [cMessageMgr respondsToSelector:@selector(AddMsg:MsgWrap:)]) {
-                // 用 objc_msgSend 调用 AddMsg:MsgWrap:（第二参数传 nil）
                 ((void(*)(id, SEL, id, id))objc_msgSend)(cMessageMgr, @selector(AddMsg:MsgWrap:), msgWrap, nil);
                 return;
             }
         }
 
-        // 方式2：通过父类 OnAddMsg:MsgWrap: 发送
+        // 方式2：通过 OnAddMsg:MsgWrap:
         id selfId = self;
         if ([selfId respondsToSelector:@selector(OnAddMsg:MsgWrap:)]) {
             ((void(*)(id, SEL, id, id))objc_msgSend)(self, @selector(OnAddMsg:MsgWrap:), msgWrap, nil);
             return;
         }
 
-        // 方式3：通过 SendTextMessage 发送
+        // 方式3：SendTextMessage
         @try {
             NSString *content = [msgWrap valueForKey:@"m_nsContent"];
             NSString *toUsr = [msgWrap valueForKey:@"m_nsToUsr"];
@@ -404,14 +389,24 @@ static NSArray *PKC60sGetAPIList(void) {
                     return;
                 }
             }
-        } @catch (NSException *e) {
-            NSLog(@"[PKC60sFix] SendTextMessage fallback failed: %@", e);
-        }
-
-        NSLog(@"[PKC60sFix] All message sending methods failed");
-    } @catch (NSException *e) {
-        NSLog(@"[PKC60sFix] Error in AddMsg:MsgWrap: %@", e);
-    }
+        } @catch (NSException *e) {}
+    } @catch (NSException *e) {}
 }
 
-%end
+%ctor {
+    @autoreleasepool {
+        // 只在方法不存在时添加，不覆盖微信原有方法
+        Class wcClass = NSClassFromString(@"WeixinContentLogicController");
+        if (wcClass) {
+            SEL addMsgSel = NSSelectorFromString(@"AddMsg:MsgWrap:");
+            if (![wcClass instancesRespondToSelector:addMsgSel]) {
+                // 方法不存在 → 添加转发实现（PKC 需要）
+                class_addMethod(wcClass, addMsgSel, (IMP)pkc_forwardAddMsg, "v@:@@");
+                NSLog(@"[PKC60sFix] Added AddMsg:MsgWrap: to WeixinContentLogicController (was missing)");
+            } else {
+                // 方法已存在 → 不干预，微信正常发消息/语音
+                NSLog(@"[PKC60sFix] AddMsg:MsgWrap: already exists, not touching");
+            }
+        }
+    }
+}
