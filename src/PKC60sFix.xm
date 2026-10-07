@@ -387,7 +387,8 @@ static NSArray *PKC60sGetAPIList(void) {
         }
 
         // 方式2：通过父类 OnAddMsg:MsgWrap: 发送
-        if ([self respondsToSelector:@selector(OnAddMsg:MsgWrap:)]) {
+        id selfId = self;
+        if ([selfId respondsToSelector:@selector(OnAddMsg:MsgWrap:)]) {
             ((void(*)(id, SEL, id, id))objc_msgSend)(self, @selector(OnAddMsg:MsgWrap:), msgWrap, nil);
             return;
         }
@@ -398,7 +399,7 @@ static NSArray *PKC60sGetAPIList(void) {
             NSString *toUsr = [msgWrap valueForKey:@"m_nsToUsr"];
             if (content.length > 0 && toUsr.length > 0) {
                 SEL sendSel = NSSelectorFromString(@"SendTextMessage:replyingMessage:isPasted:");
-                if ([self respondsToSelector:sendSel]) {
+                if ([selfId respondsToSelector:sendSel]) {
                     ((void(*)(id, SEL, id, id, BOOL))objc_msgSend)(self, sendSel, content, nil, NO);
                     return;
                 }
