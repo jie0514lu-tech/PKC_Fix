@@ -16,7 +16,7 @@ jobs:
     - name: Install Theos
       run: |
         sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
-        brew install ldid fakeroot dpkg
+        brew install ldid dpkg
 
     - name: Setup SDK
       run: |
@@ -24,14 +24,25 @@ jobs:
         sudo mkdir -p /opt/theos/sdks
         sudo ln -sf "$SDK_PATH" /opt/theos/sdks/iPhoneOS.sdk
 
-    - name: Build PKC60sFix
+    - name: Build PKC60sFix dylib
       run: |
         export THEOS=/opt/theos
         make clean 2>&1
-        make package FINALPACKAGE=1 2>&1
+        make FINALPACKAGE=1 2>&1
+        echo "=== 编译产物 ==="
+        find .theos -name "*.dylib" 2>/dev/null
+        # 查找最终的 dylib（通常在 .theos/obj/ 下）
+        DYLIB=$(find .theos -name "PKC60sFix.dylib" | head -1)
+        echo "DYLIB=$DYLIB"
+        if [ -n "$DYLIB" ]; then
+          # 用 ldid 签名
+          ldid -S "$DYLIB"
+          echo "已签名"
+        fi
 
     - name: Find dylib
-      run: find . -name "*.dylib" -o -name "*.deb" 2>/dev/null
+      run: |
+        find . -name "PKC60sFix.dylib" 2>/dev/null
 
     - name: Extract original deb
       run: |
@@ -44,17 +55,24 @@ jobs:
 
     - name: Merge and Repackage
       run: |
-        DYLIB=$(find . -name "PKC60sFix.dylib" -not -path "*/deb_work/*" | head -1)
+        # 查找编译好的 dylib（在 .theos/obj/ 目录下）
+        DYLIB=$(find .theos -name "PKC60sFix.dylib" | head -1)
+        echo "补丁 dylib: $DYLIB"
         if [ -z "$DYLIB" ]; then echo "dylib not found"; exit 1; fi
         LIB_DIR="deb_work/extracted/var/jb/Library/MobileSubstrate/DynamicLibraries"
         cp "$DYLIB" "$LIB_DIR/PKC60sFix.dylib"
         cp PKC60sFix.plist "$LIB_DIR/PKC60sFix.plist"
+        echo "=== 合并后的 DynamicLibraries ==="
+        ls -la "$LIB_DIR"
+        # 重新打包 data.tar
         cd deb_work/extracted
         tar cf ../data.tar .
-        if [ -f ../data.tar.xz ]; then xz -f -9 ../data.tar; fi
-        cd ..
-        cd ..
+        xz -f -9 ../data.tar
+        cd ../..
+        # 重新创建 deb
         ar rcs PKC_0.9-9-Beta1-Fixed.deb deb_work/debian-binary deb_work/control.tar.* deb_work/data.tar.*
+        echo "=== 最终 deb ==="
+        ls -la PKC_0.9-9-Beta1-Fixed.deb
 
     - name: Upload deb artifact
       uses: actions/upload-artifact@v4
