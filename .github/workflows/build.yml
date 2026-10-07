@@ -15,96 +15,132 @@ jobs:
 
     - name: Install Theos
       run: |
-        echo "安装 Theos 工具链..."
+        echo "=== 安装 Theos ==="
         sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
-        echo "/opt/theos" >> $GITHUB_PATH
-        echo "THEOS=/opt/theos" >> $GITHUB_ENV
+        # 安装依赖
+        brew install ldid fakeroot dpkg
+        echo "done"
 
     - name: Setup SDK
       run: |
-        # 尝试使用 Xcode 自带的 iPhoneOS SDK
-        SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
+        echo "=== 设置 SDK ==="
+        # 列出所有可用 SDK
+        xcodebuild -showsdks
+        # 获取 iPhoneOS SDK 路径
+        SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
         echo "SDK_PATH: $SDK_PATH"
-        if [ -n "$SDK_PATH" ]; then
-          sudo mkdir -p /opt/theos/sdks
-          sudo ln -sf "$SDK_PATH" /opt/theos/sdks/iPhoneOS.sdk
-        fi
+        # 创建 Theos SDK 链接
+        sudo mkdir -p /opt/theos/sdks
+        sudo ln -sf "$SDK_PATH" /opt/theos/sdks/iPhoneOS.sdk
+        ls -la /opt/theos/sdks/
+
+    - name: Debug - Check Theos
+      run: |
+        echo "=== Theos 检查 ==="
+        export THEOS=/opt/theos
+        echo "THEOS=$THEOS"
+        ls -la $THEOS/makefiles/common.mk
+        ls -la $THEOS/makefiles/tweak.mk
+        echo "=== Makefile 内容 ==="
+        cat Makefile
+        echo "=== 源文件 ==="
+        ls -la src/
 
     - name: Build PKC60sFix
       run: |
+        echo "=== 编译 PKC60sFix ==="
         export THEOS=/opt/theos
-        make clean || true
-        make package FINALPACKAGE=1
-        echo "=== 编译结果 ==="
-        find . -name "*.dylib" -o -name "*.deb" | head -20
-        ls -la packages/ || true
-        ls -la *.deb || true
+        echo "THEOS=$THEOS"
+        make clean 2>&1 || true
+        make package FINALPACKAGE=1 2>&1 || {
+          echo "=== make 失败，尝试详细错误 ==="
+          export THEOS=/opt/theos
+          make package FINALPACKAGE=1 2>&1
+        }
+
+    - name: Debug - Find built files
+      run: |
+        echo "=== 查找编译产物 ==="
+        find . -name "*.dylib" -type f 2>/dev/null
+        find . -name "*.deb" -type f 2>/dev/null
+        echo "=== packages 目录 ==="
+        ls -la packages/ 2>/dev/null || echo "packages 目录不存在"
 
     - name: Extract original deb
       run: |
         echo "=== 解压原始 PKC deb ==="
-        mkdir -p deb_work
+        mkdir -p deb_work/extracted
         cd deb_work
         ar x ../original/PKCWeChatTools.deb
-        echo "=== 解压 data.tar ==="
-        mkdir -p extracted
+        echo "=== ar 内容 ==="
+        ls -la
         cd extracted
-        tar xf ../data.tar.xz || tar xf ../data.tar
-        echo "=== 原始 deb 内容 ==="
-        find . -type f | head -20
+        # 尝试解压 data.tar.xz 或 data.tar
+        if [ -f ../data.tar.xz ]; then
+          tar xf ../data.tar.xz
+        elif [ -f ../data.tar ]; then
+          tar xf ../data.tar
+        elif [ -f ../data.tar.gz ]; then
+          tar xzf ../data.tar.gz
+        fi
+        echo "=== 解压后内容 ==="
+        find . -type f
 
     - name: Merge fix dylib into deb
       run: |
         echo "=== 合并补丁到 deb ==="
-        DYLIB_PATH=$(find . -name "PKC60sFix.dylib" -path "*/packages/*" | head -1)
-        if [ -z "$DYLIB_PATH" ]; then
-          DYLIB_PATH=$(find . -name "PKC60sFix.dylib" | head -1)
-        fi
+        # 查找编译好的 dylib
+        DYLIB_PATH=$(find . -name "PKC60sFix.dylib" -not -path "*/deb_work/*" | head -1)
         echo "补丁 dylib: $DYLIB_PATH"
         
         if [ -z "$DYLIB_PATH" ]; then
-          echo "ERROR: PKC60sFix.dylib 未找到！"
+          echo "ERROR: PKC60sFix.dylib 未找到！编译可能失败。"
+          echo "=== 列出所有文件 ==="
+          find . -type f -name "*.dylib"
           exit 1
         fi
         
-        # 复制补丁 dylib 和 plist 到 deb 的 DynamicLibraries 目录
         DEB_LIB_DIR="deb_work/extracted/var/jb/Library/MobileSubstrate/DynamicLibraries"
         cp "$DYLIB_PATH" "$DEB_LIB_DIR/PKC60sFix.dylib"
         cp PKC60sFix.plist "$DEB_LIB_DIR/PKC60sFix.plist"
         
-        echo "=== 合并后的 DynamicLibraries 目录 ==="
+        echo "=== 合并后的 DynamicLibraries ==="
         ls -la "$DEB_LIB_DIR"
 
     - name: Repackage deb
       run: |
         echo "=== 重新打包 deb ==="
         cd deb_work/extracted
-        # 重新创建 data.tar
+        
+        # 重新创建 data.tar（先打包目录内容）
         tar cf ../data.tar .
-        # 如果有 xz，用 xz 压缩
-        if command -v xz &>/dev/null; then
-          xz -f ../data.tar
+        
+        # 如果原始是 xz 格式，用 xz 压缩
+        if [ -f ../data.tar.xz ]; then
+          xz -f -9 ../data.tar
         fi
-        cd ..
         
-        # 重新创建 deb 包
-        rm -f ../PKC_0.9-9-Beta1-Fixed.deb
-        ar rcs ../PKC_0.9-9-Beta1-Fixed.deb debian-binary control.tar.* data.tar.*
         cd ..
+        echo "=== deb_work 内容 ==="
+        ls -la
         
-        echo "=== 最终 deb 文件 ==="
+        # 重新创建 deb
+        cd ..
+        ar rcs PKC_0.9-9-Beta1-Fixed.deb deb_work/debian-binary deb_work/control.tar.* deb_work/data.tar.*
+        
+        echo "=== 最终 deb ==="
         ls -la PKC_0.9-9-Beta1-Fixed.deb
-        echo "大小: $(du -h PKC_0.9-9-Beta1-Fixed.deb | cut -f1)"
 
     - name: Upload deb artifact
       uses: actions/upload-artifact@v4
       with:
         name: PKC-Complete-Fixed
         path: PKC_0.9-9-Beta1-Fixed.deb
-        if-no-files-found: error
+        if-no-files-found: warn
 
     - name: Create Release
       uses: softprops/action-gh-release@v1
+      if: github.ref == 'refs/heads/main'
       with:
         tag_name: v1.1-fixed
         name: PKC 0.9-9 Beta1 Fixed
