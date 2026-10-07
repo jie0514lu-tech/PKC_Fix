@@ -1,0 +1,62 @@
+name: Build PKC60sFix Deb
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install Theos
+      run: |
+        echo "安装 Theos 工具链..."
+        sudo git clone --recursive https://github.com/theos/theos.git /opt/theos
+        echo "/opt/theos" >> $GITHUB_PATH
+        echo "THEOS=/opt/theos" >> $GITHUB_ENV
+
+    - name: Setup iOS SDK
+      run: |
+        echo "检查可用 SDK..."
+        xcodebuild -showsdks || true
+        # 使用 Xcode 自带的 iPhoneOS SDK
+        SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path 2>/dev/null || echo "")
+        echo "SDK_PATH: $SDK_PATH"
+        if [ ! -d "$SDK_PATH" ]; then
+          echo "iPhoneOS SDK 不存在，尝试从 Xcode 获取..."
+          ls -la $(xcode-select -p)/Platforms/iPhoneOS.platform/Developer/SDKs/ || true
+        fi
+
+    - name: Build
+      run: |
+        echo "开始编译..."
+        export THEOS=/opt/theos
+        make clean || true
+        make package FINALPACKAGE=1
+        echo "编译完成"
+        ls -la packages/ || ls -la *.deb || true
+
+    - name: Upload deb artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: PKC60sFix-deb
+        path: |
+          packages/*.deb
+          *.deb
+        if-no-files-found: warn
+
+    - name: Release
+      uses: softprops/action-gh-release@v1
+      if: github.ref_type == 'branch'
+      with:
+        tag_name: v1.1
+        files: |
+          packages/*.deb
+          *.deb
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
