@@ -32,57 +32,101 @@ jobs:
         export THEOS=/opt/theos
         make clean 2>&1
         make FINALPACKAGE=1 2>&1
-        echo "=== 编译产物 ==="
-        find .theos -name "*.dylib" 2>/dev/null
-        # 查找最终的 dylib（通常在 .theos/obj/ 下）
-        DYLIB=$(find .theos -name "PKC60sFix.dylib" | head -1)
+        echo "=== 查找 dylib ==="
+        DYLIB=$(find .theos -name "PKC60sFix.dylib" -type f | head -1)
         echo "DYLIB=$DYLIB"
-        if [ -n "$DYLIB" ]; then
-          # 用 ldid 签名
-          ldid -S "$DYLIB"
-          echo "已签名"
+        if [ -z "$DYLIB" ]; then
+          echo "ERROR: dylib not found!"
+          find . -name "*.dylib" -type f 2>/dev/null
+          exit 1
         fi
+        echo "dylib size: $(du -h "$DYLIB" | cut -f1)"
+        ldid -S "$DYLIB"
+        echo "已签名"
 
-    - name: Find dylib
+    - name: Extract original deb and merge
       run: |
-        find . -name "PKC60sFix.dylib" 2>/dev/null
-
-    - name: Extract original deb
-      run: |
-        mkdir -p deb_work/extracted
-        cd deb_work
+        echo "=== 原始 deb 大小 ==="
+        ls -la original/PKCWeChatTools.deb
+        
+        # 创建工作目录
+        rm -rf deb_build
+        mkdir -p deb_build
+        
+        # 解压原始 deb
+        cd deb_build
         ar x ../original/PKCWeChatTools.deb
-        cd extracted
-        if [ -f ../data.tar.xz ]; then tar xf ../data.tar.xz; else tar xf ../data.tar; fi
+        echo "=== ar 解压内容 ==="
+        ls -la
+        
+        # 解压 control.tar
+        mkdir -p control_extract
+        cd control_extract
+        if [ -f ../control.tar.xz ]; then
+          tar xf ../control.tar.xz
+        elif [ -f ../control.tar.gz ]; then
+          tar xzf ../control.tar.gz
+        else
+          tar xf ../control.tar
+        fi
+        echo "=== control 内容 ==="
+        cat ./control 2>/dev/null || find . -type f
+        cd ..
+        
+        # 解压 data.tar
+        mkdir -p data_extract
+        cd data_extract
+        if [ -f ../data.tar.xz ]; then
+          tar xf ../data.tar.xz
+        elif [ -f ../data.tar.gz ]; then
+          tar xzf ../data.tar.gz
+        else
+          tar xf ../data.tar
+        fi
+        echo "=== data 内容 ==="
         find . -type f
-
-    - name: Merge and Repackage
-      run: |
-        # 查找编译好的 dylib（在 .theos/obj/ 目录下）
-        DYLIB=$(find .theos -name "PKC60sFix.dylib" | head -1)
+        cd ..
+        
+        # 构建 dpkg-deb 目录结构
+        mkdir -p pkg/DEBIAN
+        cp control_extract/control pkg/DEBIAN/control
+        # 复制 data 内容（保留 var/jb/... 结构）
+        cp -R data_extract/* pkg/ 2>/dev/null || true
+        
+        echo "=== pkg 目录结构 ==="
+        find pkg -type f
+        
+        # 复制补丁 dylib 和 plist
+        DYLIB=$(find ../.theos -name "PKC60sFix.dylib" -type f | head -1)
         echo "补丁 dylib: $DYLIB"
-        if [ -z "$DYLIB" ]; then echo "dylib not found"; exit 1; fi
-        LIB_DIR="deb_work/extracted/var/jb/Library/MobileSubstrate/DynamicLibraries"
+        LIB_DIR="pkg/var/jb/Library/MobileSubstrate/DynamicLibraries"
         cp "$DYLIB" "$LIB_DIR/PKC60sFix.dylib"
-        cp PKC60sFix.plist "$LIB_DIR/PKC60sFix.plist"
-        echo "=== 合并后的 DynamicLibraries ==="
-        ls -la "$LIB_DIR"
-        # 重新打包 data.tar
-        cd deb_work/extracted
-        tar cf ../data.tar .
-        xz -f -9 ../data.tar
-        cd ../..
-        # 重新创建 deb
-        ar rcs PKC_0.9-9-Beta1-Fixed.deb deb_work/debian-binary deb_work/control.tar.* deb_work/data.tar.*
+        cp ../PKC60sFix.plist "$LIB_DIR/PKC60sFix.plist"
+        
+        echo "=== 合并后 pkg 内容 ==="
+        find pkg -type f -exec ls -la {} \;
+        
+        # 用 dpkg-deb 打包
+        cd ..
+        dpkg-deb -Zxz -b deb_build/pkg PKC_0.9-9-Beta1-Fixed.deb
+        
         echo "=== 最终 deb ==="
         ls -la PKC_0.9-9-Beta1-Fixed.deb
+        echo "大小: $(du -h PKC_0.9-9-Beta1-Fixed.deb | cut -f1)"
+
+    - name: Verify deb
+      run: |
+        echo "=== 验证 deb 内容 ==="
+        dpkg-deb -c PKC_0.9-9-Beta1-Fixed.deb
+        echo "=== deb 包信息 ==="
+        dpkg-deb -I PKC_0.9-9-Beta1-Fixed.deb
 
     - name: Upload deb artifact
       uses: actions/upload-artifact@v4
       with:
         name: PKC-Complete-Fixed
         path: PKC_0.9-9-Beta1-Fixed.deb
-        if-no-files-found: warn
+        if-no-files-found: error
 
     - name: Create Release
       uses: softprops/action-gh-release@v1
