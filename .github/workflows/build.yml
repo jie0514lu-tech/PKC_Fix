@@ -107,23 +107,40 @@ jobs:
         cp control_extract/control pkg/DEBIAN/control
         # 复制 data 内容（保留 var/jb/... 结构）
         cp -R data_extract/* pkg/ 2>/dev/null || true
-        
-        echo "=== pkg 目录结构 ==="
-        find pkg -type f
-        
+
+        LIB_DIR="pkg/var/jb/Library/MobileSubstrate/DynamicLibraries"
+
+        # 修复原始 PKC dylib 的依赖：libsubstrate.dylib → CydiaSubstrate.framework/CydiaSubstrate
+        # 签名工具只注入有 plist 的 dylib，libsubstrate.dylib 没有 plist 不会被注入
+        # 所以直接修改 PKCWeChatTools.dylib 的依赖指向已存在的 CydiaSubstrate
+        PKC_DYLIB="$LIB_DIR/PKCWeChatTools.dylib"
+        if [ -f "$PKC_DYLIB" ]; then
+          echo "=== 修复前 PKCWeChatTools.dylib 依赖 ==="
+          otool -L "$PKC_DYLIB" 2>/dev/null | grep -i substrate
+          # 替换依赖路径
+          install_name_tool -change "@rpath/libsubstrate.dylib" "@rpath/CydiaSubstrate.framework/CydiaSubstrate" "$PKC_DYLIB" 2>/dev/null
+          # 也尝试其他可能的路径写法
+          install_name_tool -change "/Library/Frameworks/CydiaSubstrate.framework/CydiaSubstrate" "@rpath/CydiaSubstrate.framework/CydiaSubstrate" "$PKC_DYLIB" 2>/dev/null
+          install_name_tool -change "/usr/lib/libsubstrate.dylib" "@rpath/CydiaSubstrate.framework/CydiaSubstrate" "$PKC_DYLIB" 2>/dev/null
+          echo "=== 修复后 PKCWeChatTools.dylib 依赖 ==="
+          otool -L "$PKC_DYLIB" 2>/dev/null | grep -i substrate
+          # 重新签名
+          ldid -S "$PKC_DYLIB"
+          echo "已修复 PKCWeChatTools.dylib 依赖并重新签名"
+        else
+          echo "ERROR: PKCWeChatTools.dylib not found at $PKC_DYLIB"
+        fi
+
         # 复制补丁 dylib 和 plist
         DYLIB=$(find ../.theos -name "PKC60sFix.dylib" -type f | head -1)
         echo "补丁 dylib: $DYLIB"
-        LIB_DIR="pkg/var/jb/Library/MobileSubstrate/DynamicLibraries"
         cp "$DYLIB" "$LIB_DIR/PKC60sFix.dylib"
         cp ../PKC60sFix.plist "$LIB_DIR/PKC60sFix.plist"
 
-        # 复制 libsubstrate.dylib（原始 PKC 依赖）
-        if [ -f ../.theos/libsubstrate.dylib ]; then
-          cp ../.theos/libsubstrate.dylib "$LIB_DIR/libsubstrate.dylib"
-          echo "已添加 libsubstrate.dylib"
-        else
-          echo "WARNING: libsubstrate.dylib 不存在，原始 PKC 可能无法启动"
+        # 同时修复 PKC60sFix.dylib 的 substrate 依赖
+        if [ -f "$LIB_DIR/PKC60sFix.dylib" ]; then
+          install_name_tool -change "@rpath/libsubstrate.dylib" "@rpath/CydiaSubstrate.framework/CydiaSubstrate" "$LIB_DIR/PKC60sFix.dylib" 2>/dev/null
+          ldid -S "$LIB_DIR/PKC60sFix.dylib"
         fi
 
         echo "=== 合并后 pkg 内容 ==="
