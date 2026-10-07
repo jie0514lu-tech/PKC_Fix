@@ -53,6 +53,18 @@ make package
 - `PKC60sFix.dylib` — 60秒新闻 + 消息发送修复
 - `PKC60sFix.plist` — 注入过滤（com.tencent.xin）
 
-## 版本
+## 版本历史
 
-- **v1.1** — 当前版本（修复启动闪退 + 60秒新闻 + 消息发送）
+### v1.2（当前版本）
+- 修复消息和语音发送失败问题
+- 改用 `class_addMethod` 在 `%ctor` 中检查，只在 `AddMsg:MsgWrap:` 方法不存在时才添加转发实现
+- 如果微信已自带此方法，完全不干预，保证正常发消息/语音不受影响
+
+### v1.1
+- 修复 60秒新闻只发标题/空白/乱码（多 API 回退 + 正确 JSON 解析）
+- 修复微信 8.0.78/79 消息发送方式变化导致发送失败（AddMsg:MsgWrap: 转发到 CMessageMgr）
+- 修复注入后启动闪退（install_name_tool 将 libsubstrate.dylib 依赖改为 CydiaSubstrate.framework）
+- 注意：此版本用 `%hook` 覆盖了 AddMsg:MsgWrap:，会影响正常消息/语音发送，已在 v1.2 修复
+
+### v1.0
+- 初始版本，仅修复 60秒新闻 API 和编码问题
