@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.3
+// PKC 60秒新闻修复插件 v3.4
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -58,101 +58,103 @@ static NSArray *PKC60sGetAPIList(void) {
     return list;
 }
 
-// === 失败追踪：记录每个API的连续失败次数和上次失败时间 ===
-static NSMutableDictionary *PKC60sGetFailureMap(void) {
-    static NSMutableDictionary *map = nil;
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
-        map = [NSMutableDictionary dictionary];
-    });
-    return map;
+// === 今日是否已完成获取 ===
+// 成功获取一次后，当天不再重复获取，直到第二天设定时间
+static NSString *PKC60sGetTodayDoneDate(void) {
+    @try {
+        return [[NSUserDefaults standardUserDefaults] stringForKey:@"pkc60s_done_date"];
+    } @catch (NSException *e) {}
+    return nil;
 }
 
-// 检查API是否应该跳过（连续失败3次以上且30分钟内）
-static BOOL PKC60sShouldSkipAPI(NSString *urlString) {
+static BOOL PKC60sIsTodayDone(void) {
     @try {
-        NSMutableDictionary *map = PKC60sGetFailureMap();
-        NSDictionary *info = map[urlString];
-        if (!info) return NO;
-        NSInteger failCount = [info[@"failCount"] integerValue];
-        NSDate *lastFail = info[@"lastFailDate"];
-        if (failCount >= 3 && lastFail) {
-            NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:lastFail];
-            if (elapsed < 1800) { // 30分钟内跳过
-                NSLog(@"[PKC60sFix] Skipping %@ (failed %ld times, %.0f min ago)", urlString, (long)failCount, elapsed / 60.0);
-                return YES;
-            }
-            // 超过30分钟，重置计数
-            [map removeObjectForKey:urlString];
+        NSString *doneDate = PKC60sGetTodayDoneDate();
+        if (!doneDate || doneDate.length == 0) return NO;
+
+        NSDate *now = [NSDate date];
+        NSCalendar *cal = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        NSDateComponents *comps = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:now];
+        NSString *today = [NSString stringWithFormat:@"%ld-%02ld-%02ld", (long)[comps year], (long)[comps month], (long)[comps day]];
+
+        if ([doneDate isEqualToString:today]) {
+            NSLog(@"[PKC60sFix] Today already done (%@), skip", today);
+            return YES;
         }
     } @catch (NSException *e) {}
     return NO;
 }
 
-// 记录API失败
-static void PKC60sRecordFailure(NSString *urlString) {
+static void PKC60sMarkTodayDone(void) {
     @try {
-        NSMutableDictionary *map = PKC60sGetFailureMap();
-        NSMutableDictionary *info = [map[urlString] mutableCopy] ?: [NSMutableDictionary dictionary];
-        NSInteger count = [info[@"failCount"] integerValue];
-        info[@"failCount"] = @(count + 1);
-        info[@"lastFailDate"] = [NSDate date];
-        map[urlString] = info;
+        NSDate *now = [NSDate date];
+        NSCalendar *cal = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        NSDateComponents *comps = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:now];
+        NSString *today = [NSString stringWithFormat:@"%ld-%02ld-%02ld", (long)[comps year], (long)[comps month], (long)[comps day]];
+        [[NSUserDefaults standardUserDefaults] setObject:today forKey:@"pkc60s_done_date"];
+        NSLog(@"[PKC60sFix] Marked today as done: %@", today);
     } @catch (NSException *e) {}
 }
 
-// 记录API成功（重置失败计数）
-static void PKC60sRecordSuccess(NSString *urlString) {
+// === 本地新闻全文保存（第二天对比用） ===
+static NSDictionary *PKC60sGetSavedNews(void) {
     @try {
-        NSMutableDictionary *map = PKC60sGetFailureMap();
-        [map removeObjectForKey:urlString];
-    } @catch (NSException *e) {}
-}
-
-// === 内容比对：防止"今天日期+昨天内容" ===
-// 保存上次的新闻内容，比对是否重复
-
-static NSString *PKC60sGetLastNewsHash(void) {
-    @try {
-        return [[NSUserDefaults standardUserDefaults] stringForKey:@"pkc60s_last_news_hash"];
+        return [[NSUserDefaults standardUserDefaults] dictionaryForKey:@"pkc60s_saved_news"];
     } @catch (NSException *e) {}
     return nil;
 }
 
-static void PKC60sSaveNewsHash(NSString *newsText) {
+static void PKC60sSaveNews(NSString *newsText) {
     @try {
-        // 取新闻正文的前500字做哈希（排除日期头，因为日期每天不同）
-        NSString *contentToHash = newsText;
-        if (newsText.length > 500) {
-            contentToHash = [newsText substringFromIndex:newsText.length - 500];
-        }
-        // 简单哈希：取前500字的长度+首尾各50字拼接
-        NSString *head = contentToHash.length > 50 ? [contentToHash substringToIndex:50] : contentToHash;
-        NSString *tail = contentToHash.length > 50 ? [contentToHash substringFromIndex:contentToHash.length - 50] : contentToHash;
-        NSString *hash = [NSString stringWithFormat:@"%lu|%@|%@", (unsigned long)contentToHash.length, head, tail];
+        NSDate *now = [NSDate date];
+        NSCalendar *cal = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        NSDateComponents *comps = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:now];
+        NSString *today = [NSString stringWithFormat:@"%ld-%02ld-%02ld", (long)[comps year], (long)[comps month], (long)[comps day]];
 
-        [[NSUserDefaults standardUserDefaults] setObject:hash forKey:@"pkc60s_last_news_hash"];
+        // 删除旧的，保存新的
+        [[NSUserDefaults standardUserDefaults] setObject:@{@"date": today, @"content": newsText} forKey:@"pkc60s_saved_news"];
+        NSLog(@"[PKC60sFix] Saved news to local (date=%@, length=%lu)", today, (unsigned long)newsText.length);
     } @catch (NSException *e) {}
 }
 
-// 检查新闻内容是否和上次重复
-static BOOL PKC60sIsContentDuplicate(NSString *newsText) {
+// 检查新闻是否和昨天保存的相同（防止发昨天的重复新闻）
+static BOOL PKC60sIsYesterdayDuplicate(NSString *newsText) {
     @try {
-        NSString *lastHash = PKC60sGetLastNewsHash();
-        if (!lastHash || lastHash.length == 0) return NO; // 没有上次记录，不判断
+        NSDictionary *saved = PKC60sGetSavedNews();
+        if (!saved) return NO; // 没有保存过，不判断
 
-        // 计算当前新闻的哈希
-        NSString *contentToHash = newsText;
-        if (newsText.length > 500) {
-            contentToHash = [newsText substringFromIndex:newsText.length - 500];
+        NSString *savedDate = saved[@"date"];
+        NSString *savedContent = saved[@"content"];
+        if (!savedContent || savedContent.length == 0) return NO;
+
+        NSDate *now = [NSDate date];
+        NSCalendar *cal = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        NSDateComponents *comps = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:now];
+        NSString *today = [NSString stringWithFormat:@"%ld-%02ld-%02ld", (long)[comps year], (long)[comps month], (long)[comps day]];
+
+        // 如果保存的是今天的 → 已发送过，不重复
+        if ([savedDate isEqualToString:today]) {
+            NSLog(@"[PKC60sFix] Already saved today, comparing content");
+            // 内容相同 → 重复，不发送
+            // 内容不同 → 可能是更新版本，允许发送
+            if ([savedContent isEqualToString:newsText]) {
+                NSLog(@"[PKC60sFix] Content same as already saved today, skip");
+                return YES;
+            }
+            return NO;
         }
-        NSString *head = contentToHash.length > 50 ? [contentToHash substringToIndex:50] : contentToHash;
-        NSString *tail = contentToHash.length > 50 ? [contentToHash substringFromIndex:contentToHash.length - 50] : contentToHash;
-        NSString *currentHash = [NSString stringWithFormat:@"%lu|%@|%@", (unsigned long)contentToHash.length, head, tail];
 
-        if ([currentHash isEqualToString:lastHash]) {
-            NSLog(@"[PKC60sFix] Content duplicate detected (same as last sent)");
-            return YES; // 内容重复
+        // 保存的是昨天的 → 对比内容
+        // 提取新闻正文（去掉日期头，因为日期每天不同）
+        NSString *savedBody = savedContent;
+        NSString *newBody = newsText;
+        // 取后500字对比（新闻正文部分）
+        if (savedBody.length > 500) savedBody = [savedBody substringFromIndex:savedBody.length - 500];
+        if (newBody.length > 500) newBody = [newBody substringFromIndex:newBody.length - 500];
+
+        if ([savedBody isEqualToString:newBody]) {
+            NSLog(@"[PKC60sFix] Content matches yesterday's saved news, skip");
+            return YES; // 和昨天相同，是旧闻
         }
     } @catch (NSException *e) {}
     return NO;
@@ -368,17 +370,31 @@ static NSString *PKC60sFormatDateHeader(void) {
 
 @implementation PKC60sNewsFetcher
 
-// === 自动重试机制 ===
-// 当所有API都返回昨天的新闻时，30分钟后自动重试，直到获取到今天的新闻
+// === 重试机制 ===
+// 8个API全失败后等30分钟重试，直到成功，成功后当天停止
 static void (^pkcPendingCompletion)(NSString *) = nil;
 static dispatch_source_t pkcRetryTimer = nil;
-static NSInteger pkcRetryCount = 0;
-static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时），覆盖一整天
 
 + (void)fetchNewsWithCompletion:(void (^)(NSString *newsText))completion {
     if (!completion) return;
 
-    // 取消之前的重试定时器（新的get60s:调用来了，重新开始）
+    // 今天已经成功获取过 → 直接返回保存的新闻，不再重复获取
+    if (PKC60sIsTodayDone()) {
+        NSLog(@"[PKC60sFix] Today already done, returning saved news");
+        NSDictionary *saved = PKC60sGetSavedNews();
+        NSString *savedContent = saved[@"content"];
+        if (savedContent && savedContent.length > 0) {
+            pkcForceActive = YES;
+            completion(savedContent);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
+                           dispatch_get_main_queue(), ^{
+                pkcForceActive = NO;
+            });
+        }
+        return;
+    }
+
+    // 取消之前的重试定时器
     if (pkcRetryTimer) {
         dispatch_source_cancel(pkcRetryTimer);
         pkcRetryTimer = nil;
@@ -391,47 +407,24 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
     __block void (^tryNextAPI)(void) = nil;
     tryNextAPI = ^{
         if (currentIndex >= apiList.count) {
-            // 所有 API 都失败了
-            PKC60sRecordFailure(@"all");
+            // 8个API全部失败 → 30分钟后重试
+            NSLog(@"[PKC60sFix] All 8 APIs failed, will retry in 30 min");
 
-            // 检查是否还可以重试
-            if (pkcRetryCount < PKC_MAX_RETRIES) {
-                pkcRetryCount++;
-                NSLog(@"[PKC60sFix] All APIs failed, scheduling retry #%ld in 30 min", (long)pkcRetryCount);
-
-                // 保存 completion block，30分钟后重试（ARC 自动 retain）
-                pkcPendingCompletion = localCompletion;
-
-                pkcRetryTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
-                dispatch_source_set_timer(pkcRetryTimer,
-                                          dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * 60 * NSEC_PER_SEC)),
-                                          30 * 60 * NSEC_PER_SEC, 60 * NSEC_PER_SEC);
-                dispatch_source_set_event_handler(pkcRetryTimer, ^{
-                    // 重试：重新获取新闻
-                    if (pkcPendingCompletion) {
-                        void (^retryCompletion)(NSString *) = pkcPendingCompletion;
-                        pkcPendingCompletion = nil;
-                        dispatch_source_cancel(pkcRetryTimer);
-                        pkcRetryTimer = nil;
-
-                        // 重新调用 fetchNewsWithCompletion
-                        [self fetchNewsWithCompletion:retryCompletion];
-                    }
-                });
-                dispatch_resume(pkcRetryTimer);
-            } else {
-                // 超过最大重试次数，发送 fallback
-                NSLog(@"[PKC60sFix] Max retries reached, sending fallback");
-                pkcRetryCount = 0;
-                NSString *dateHeader = PKC60sFormatDateHeader();
-                NSString *fallback = [NSString stringWithFormat:@"📰 每日60秒新闻\n%@在这里，每天60秒读懂世界\n\n抱歉，今日新闻获取失败，请稍后重试。\n\n📢 来源：60秒读懂世界", dateHeader.length > 0 ? [dateHeader stringByAppendingString:@"\n"] : @""];
-                pkcForceActive = YES;
-                localCompletion(fallback);
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
-                               dispatch_get_main_queue(), ^{
-                    pkcForceActive = NO;
-                });
-            }
+            pkcPendingCompletion = localCompletion;
+            pkcRetryTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(0, 0));
+            dispatch_source_set_timer(pkcRetryTimer,
+                                      dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * 60 * NSEC_PER_SEC)),
+                                      30 * 60 * NSEC_PER_SEC, 60 * NSEC_PER_SEC);
+            dispatch_source_set_event_handler(pkcRetryTimer, ^{
+                if (pkcPendingCompletion) {
+                    void (^retryCompletion)(NSString *) = pkcPendingCompletion;
+                    pkcPendingCompletion = nil;
+                    dispatch_source_cancel(pkcRetryTimer);
+                    pkcRetryTimer = nil;
+                    [self fetchNewsWithCompletion:retryCompletion];
+                }
+            });
+            dispatch_resume(pkcRetryTimer);
             return;
         }
 
@@ -439,110 +432,80 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
         BOOL isTextAPI = [urlString containsString:@"format=text"];
         currentIndex++;
 
-        // 检查是否应该跳过此API（连续失败3次且30分钟内）
-        if (PKC60sShouldSkipAPI(urlString)) {
-            tryNextAPI();
-            return;
-        }
-
         NSURL *url = [NSURL URLWithString:urlString];
-        if (!url) {
-            PKC60sRecordFailure(urlString);
-            tryNextAPI();
-            return;
-        }
+        if (!url) { tryNextAPI(); return; }
 
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-        request.timeoutInterval = 10.0; // 缩短超时到10秒，加快回退
+        request.timeoutInterval = 10.0;
         [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148" forHTTPHeaderField:@"User-Agent"];
         [request setValue:isTextAPI ? @"text/plain" : @"application/json" forHTTPHeaderField:@"Accept"];
 
         NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
             @try {
                 if (error || !data) {
-                    NSLog(@"[PKC60sFix] API %@ failed: %@", urlString, error.localizedDescription);
-                    PKC60sRecordFailure(urlString);
+                    NSLog(@"[PKC60sFix] API#%ld %@ failed: %@", (long)(currentIndex-1), urlString, error.localizedDescription);
                     tryNextAPI();
                     return;
                 }
 
                 NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
                 if ([httpResp isKindOfClass:[NSHTTPURLResponse class]] && httpResp.statusCode != 200) {
-                    NSLog(@"[PKC60sFix] API %@ HTTP status: %ld", urlString, (long)httpResp.statusCode);
-                    PKC60sRecordFailure(urlString);
+                    NSLog(@"[PKC60sFix] API#%ld %@ HTTP %ld", (long)(currentIndex-1), urlString, (long)httpResp.statusCode);
                     tryNextAPI();
                     return;
                 }
 
-                // 先解析 JSON 检查新鲜度，再构建文本
                 NSDictionary *json = nil;
-                @try {
-                    json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                } @catch (NSException *e) {}
+                @try { json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil]; } @catch (NSException *e) {}
 
-                // 新鲜度检查（在构建文本之前）
                 if (!isTextAPI && json) {
                     if (!PKC60sIsNewsFresh(nil, json)) {
-                        NSLog(@"[PKC60sFix] API %@ JSON date is stale, skipping", urlString);
-                        PKC60sRecordFailure(urlString);
+                        NSLog(@"[PKC60sFix] API#%ld %@ stale JSON date", (long)(currentIndex-1), urlString);
                         tryNextAPI();
                         return;
                     }
                 }
 
-                // 解析新闻
                 NSString *newsText = [self parseNewsData:data isTextAPI:isTextAPI];
                 if (newsText.length <= 20) {
-                    NSLog(@"[PKC60sFix] API %@ returned empty content", urlString);
-                    PKC60sRecordFailure(urlString);
+                    NSLog(@"[PKC60sFix] API#%ld %@ empty content", (long)(currentIndex-1), urlString);
                     tryNextAPI();
                     return;
                 }
 
-                // 文本格式 API 的新鲜度检查
                 if (isTextAPI) {
                     if (!PKC60sIsNewsFresh(newsText, json)) {
-                        NSLog(@"[PKC60sFix] API %@ text is stale, trying next", urlString);
-                        PKC60sRecordFailure(urlString);
+                        NSLog(@"[PKC60sFix] API#%ld %@ stale text", (long)(currentIndex-1), urlString);
                         tryNextAPI();
                         return;
                     }
                 }
 
-                // 成功！重置失败计数和重试计数
-                PKC60sRecordSuccess(urlString);
-                pkcRetryCount = 0;
-
-                // 内容比对：检查是否和上次发送的重复
-                if (PKC60sIsContentDuplicate(newsText)) {
-                    NSLog(@"[PKC60sFix] API %@ content is duplicate (same as last sent), trying next", urlString);
-                    PKC60sRecordFailure(urlString);
+                // 和本地保存的新闻对比（防止发昨天的）
+                if (PKC60sIsYesterdayDuplicate(newsText)) {
+                    NSLog(@"[PKC60sFix] API#%ld %@ content is duplicate of yesterday, trying next", (long)(currentIndex-1), urlString);
                     tryNextAPI();
                     return;
                 }
 
-                // 延迟5分钟保存哈希，给 PKC 重试发送的时间
-                // 如果 PKC 在5分钟内再次获取新闻（发送失败重试），哈希还没保存，相同内容不会被跳过
-                // 5分钟后保存，防止同一天重复发送
-                NSString *newsToSave = [newsText copy];
-                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * 60 * NSEC_PER_SEC)),
-                               dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                    PKC60sSaveNewsHash(newsToSave);
-                    NSLog(@"[PKC60sFix] News hash saved after 5min delay (send assumed successful)");
-                });
+                // 成功！
+                NSLog(@"[PKC60sFix] SUCCESS from API#%ld %@", (long)(currentIndex-1), urlString);
 
-                NSLog(@"[PKC60sFix] Success from %@", urlString);
-                // 重新设置 pkcForceActive，防止重试成功后 completion 检查 applicationState 失败
+                // 标记今天已完成
+                PKC60sMarkTodayDone();
+
+                // 保存全文到本地（第二天对比用，自动删除旧的）
+                PKC60sSaveNews(newsText);
+
+                // 发送
                 pkcForceActive = YES;
-                completion(newsText);
-                // 10秒后恢复真实状态
+                localCompletion(newsText);
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
                                dispatch_get_main_queue(), ^{
                     pkcForceActive = NO;
                 });
             } @catch (NSException *exception) {
                 NSLog(@"[PKC60sFix] Exception parsing %@: %@", urlString, exception);
-                PKC60sRecordFailure(urlString);
                 tryNextAPI();
             }
         }];
@@ -1221,6 +1184,47 @@ static void pkcStartKeepAliveTimer(void) {
 
         // 5. 启动25秒保活定时器
         pkcStartKeepAliveTimer();
+
+        // 6. 延迟15秒后扫描PKC实例，提取目标wxid（等PKC初始化完成）
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)),
+                       dispatch_get_main_queue(), ^{
+            @try {
+                Class pkcCls = NSClassFromString(@"PWZfnvktqn");
+                if (!pkcCls) {
+                    NSLog(@"[PKC60sFix] PKC class not found, cannot scan target");
+                    return;
+                }
+                id pkcInstance = nil;
+                @try {
+                    if ([pkcCls respondsToSelector:@selector(sharedInstance)]) {
+                        pkcInstance = [pkcCls performSelector:@selector(sharedInstance)];
+                    }
+                } @catch (NSException *e) {}
+
+                if (pkcInstance) {
+                    pkcFindTargetInObject(pkcInstance);
+                    NSLog(@"[PKC60sFix] Target scanned: %@", pkcTargetWxid ?: @"nil");
+                } else {
+                    NSLog(@"[PKC60sFix] PKC sharedInstance not available yet");
+                    // 30秒后再试一次
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * NSEC_PER_SEC)),
+                                   dispatch_get_main_queue(), ^{
+                        @try {
+                            Class pkcCls2 = NSClassFromString(@"PWZfnvktqn");
+                            if (pkcCls2 && [pkcCls2 respondsToSelector:@selector(sharedInstance)]) {
+                                id inst = [pkcCls2 performSelector:@selector(sharedInstance)];
+                                if (inst) {
+                                    pkcFindTargetInObject(inst);
+                                    NSLog(@"[PKC60sFix] Target scanned (2nd attempt): %@", pkcTargetWxid ?: @"nil");
+                                }
+                            }
+                        } @catch (NSException *e) {}
+                    });
+                }
+            } @catch (NSException *e) {
+                NSLog(@"[PKC60sFix] Target scan exception: %@", e);
+            }
+        });
 
         NSLog(@"[PKC60sFix] === initialization complete ===");
     }
