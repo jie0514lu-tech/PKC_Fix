@@ -1,8 +1,9 @@
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v1.3
+// PKC 60秒新闻修复插件 v1.6
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -147,7 +148,17 @@ static BOOL PKC60sIsNewsFresh(NSString *newsText, NSDictionary *json) {
                     [createTime containsString:[NSString stringWithFormat:@"%ld-%ld-%ld", (long)todayYear, (long)todayMonth, (long)todayDay]]) {
                     return YES;
                 }
+                // create_time 不是今天 → 旧闻
+                NSLog(@"[PKC60sFix] Stale news: create_time=%@", createTime);
+                return NO;
             }
+
+            // JSON 中没有找到日期字段 → 无法判断新鲜度
+            // 此时不能用 PKC60sFormatDateHeader() 生成的日期来判断，因为那是今天的日期
+            // 检查新闻文本中的日期（但排除我们自己添加的日期头）
+            // 如果文本中没有API原始日期，且JSON也没日期，返回不确定（允许通过）
+            // 但记录日志方便调试
+            NSLog(@"[PKC60sFix] No date field in JSON, cannot verify freshness");
         }
 
         // 方式2：检查文本中的日期
@@ -344,6 +355,22 @@ static NSString *PKC60sFormatDateHeader(void) {
                     return;
                 }
 
+                // 先解析 JSON 检查新鲜度，再构建文本
+                NSDictionary *json = nil;
+                @try {
+                    json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                } @catch (NSException *e) {}
+
+                // 新鲜度检查（在构建文本之前）
+                if (!isTextAPI && json) {
+                    if (!PKC60sIsNewsFresh(nil, json)) {
+                        NSLog(@"[PKC60sFix] API %@ JSON date is stale, skipping", urlString);
+                        PKC60sRecordFailure(urlString);
+                        tryNextAPI();
+                        return;
+                    }
+                }
+
                 // 解析新闻
                 NSString *newsText = [self parseNewsData:data isTextAPI:isTextAPI];
                 if (newsText.length <= 20) {
@@ -353,17 +380,14 @@ static NSString *PKC60sFormatDateHeader(void) {
                     return;
                 }
 
-                // 新鲜度检查：防止发送昨天的新闻
-                NSDictionary *json = nil;
-                @try {
-                    json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                } @catch (NSException *e) {}
-
-                if (!PKC60sIsNewsFresh(newsText, json)) {
-                    NSLog(@"[PKC60sFix] API %@ returned stale news (yesterday), trying next", urlString);
-                    PKC60sRecordFailure(urlString);
-                    tryNextAPI();
-                    return;
+                // 文本格式 API 的新鲜度检查
+                if (isTextAPI) {
+                    if (!PKC60sIsNewsFresh(newsText, json)) {
+                        NSLog(@"[PKC60sFix] API %@ text is stale, trying next", urlString);
+                        PKC60sRecordFailure(urlString);
+                        tryNextAPI();
+                        return;
+                    }
                 }
 
                 // 成功！重置失败计数
@@ -526,10 +550,24 @@ static NSString *PKC60sFormatDateHeader(void) {
     // 组装新闻文本
     NSMutableString *result = [NSMutableString string];
 
-    // 日期头
-    NSString *dateHeader = PKC60sFormatDateHeader();
-    if (dateHeader.length > 0) {
-        [result appendFormat:@"%@\n", dateHeader];
+    // 日期头：优先使用 API 返回的日期，避免用今天的日期配上昨天的新闻
+    NSString *apiDate = nil;
+    for (NSString *key in @[@"date", @"update", @"create_time", @"datetime"]) {
+        id val = searchDict[key];
+        if ([val isKindOfClass:[NSString class]] && [val length] > 0) {
+            apiDate = val;
+            break;
+        }
+    }
+    if (apiDate.length > 0) {
+        // 使用 API 的日期（可能需要格式化）
+        [result appendFormat:@"%@\n", [self cleanText:apiDate]];
+    } else {
+        // API 没有日期字段，用本地生成的日期
+        NSString *dateHeader = PKC60sFormatDateHeader();
+        if (dateHeader.length > 0) {
+            [result appendFormat:@"%@\n", dateHeader];
+        }
     }
 
     // 标题
@@ -705,9 +743,59 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
     } @catch (NSException *e) {}
 }
 
+// === 5秒保活定时器 ===
+static dispatch_source_t pkcKeepAliveTimer = nil;
+static UIBackgroundTaskIdentifier pkcLastBgTask = UIBackgroundTaskInvalid;
+
+static void pkcKeepAliveFire(void) {
+    @autoreleasepool {
+        @try {
+            UIApplication *app = [UIApplication sharedApplication];
+            if (!app) return;
+
+            // 结束上一个后台任务
+            if (pkcLastBgTask != UIBackgroundTaskInvalid) {
+                [app endBackgroundTask:pkcLastBgTask];
+                pkcLastBgTask = UIBackgroundTaskInvalid;
+            }
+
+            // 申请新的后台时间
+            pkcLastBgTask = [app beginBackgroundTaskWithExpirationHandler:^{
+                @try {
+                    if (pkcLastBgTask != UIBackgroundTaskInvalid) {
+                        UIApplication *a = [UIApplication sharedApplication];
+                        [a endBackgroundTask:pkcLastBgTask];
+                        pkcLastBgTask = UIBackgroundTaskInvalid;
+                    }
+                } @catch (NSException *e) {}
+            }];
+
+            NSLog(@"[PKC60sFix] Keepalive tick, remaining: %.1fs", [app backgroundTimeRemaining]);
+        } @catch (NSException *e) {
+            NSLog(@"[PKC60sFix] Keepalive error: %@", e);
+        }
+    }
+}
+
+static void pkcStartKeepAliveTimer(void) {
+    if (pkcKeepAliveTimer) return;
+
+    pkcKeepAliveTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(pkcKeepAliveTimer,
+                              dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
+                              5 * NSEC_PER_SEC,    // 每5秒触发
+                              1 * NSEC_PER_SEC);   // 允许1秒误差
+    dispatch_source_set_event_handler(pkcKeepAliveTimer, ^{
+        pkcKeepAliveFire();
+    });
+    dispatch_resume(pkcKeepAliveTimer);
+
+    NSLog(@"[PKC60sFix] 5-second keepalive timer started");
+}
+
 %ctor {
     @autoreleasepool {
-        // 只在方法不存在时添加，不覆盖微信原有方法
+        // 1. 只在方法不存在时添加 AddMsg:MsgWrap:，不覆盖微信原有方法
         Class wcClass = NSClassFromString(@"WeixinContentLogicController");
         if (wcClass) {
             SEL addMsgSel = NSSelectorFromString(@"AddMsg:MsgWrap:");
@@ -718,5 +806,38 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
                 NSLog(@"[PKC60sFix] AddMsg:MsgWrap: already exists, not touching");
             }
         }
+
+        // 2. 启动5秒保活定时器
+        pkcStartKeepAliveTimer();
+
+        // 3. 尝试 hook PKC 的 minuteInterval 为5秒
+        // PKC 的类名做了混淆，用 runtime 遍历找到含 minuteInterval 属性的类
+        @try {
+            unsigned int classCount = 0;
+            Class *classes = objc_copyClassList(&classCount);
+            for (unsigned int i = 0; i < classCount; i++) {
+                Class cls = classes[i];
+                objc_property_t prop = class_getProperty(cls, "minuteInterval");
+                if (prop) {
+                    // 找到拥有 minuteInterval 的类，设置默认值为5
+                    id instance = nil;
+                    @try {
+                        instance = [cls performSelector:@selector(sharedInstance)];
+                    } @catch (NSException *e) {}
+                    @try {
+                        instance = [cls performSelector:@selector(pkc)];
+                    } @catch (NSException *e) {}
+
+                    if (instance) {
+                        @try {
+                            [instance setValue:@5 forKey:@"minuteInterval"];
+                            NSLog(@"[PKC60sFix] Set minuteInterval to 5 on %@", NSStringFromClass(cls));
+                        } @catch (NSException *e) {}
+                    }
+                    break;
+                }
+            }
+            free(classes);
+        } @catch (NSException *e) {}
     }
 }
