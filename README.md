@@ -55,7 +55,12 @@ make package
 
 ## 版本历史
 
-### v2.2（当前版本）
+### v3.0（当前版本 - 最终版）
+- 修复关键问题：API重试成功后调用completion时pkcForceActive已过期，现在在每次调用completion前重新设置
+- 所有completion调用路径（成功/fallback/异常）都设置pkcForceActive=YES
+- 全面审查确认：不闪退、不影响正常消息/语音发送、不影响PKC其他功能
+
+### v2.2
 - 新增后台/锁屏发送支持：hook UIApplication applicationState，在 send60s 执行期间返回 active
 - 时间到点 + 微信在后台/锁屏 → PKC 认为在前台 → 正常获取新闻并发送
 - 10秒后恢复真实状态，不影响其他功能

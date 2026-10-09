@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v2.2
+// PKC 60秒新闻修复插件 v3.0 最终版
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -407,7 +407,12 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
                 pkcRetryCount = 0;
                 NSString *dateHeader = PKC60sFormatDateHeader();
                 NSString *fallback = [NSString stringWithFormat:@"📰 每日60秒新闻\n%@在这里，每天60秒读懂世界\n\n抱歉，今日新闻获取失败，请稍后重试。\n\n📢 来源：60秒读懂世界", dateHeader.length > 0 ? [dateHeader stringByAppendingString:@"\n"] : @""];
+                pkcForceActive = YES;
                 localCompletion(fallback);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    pkcForceActive = NO;
+                });
             }
             return;
         }
@@ -509,7 +514,14 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
                 });
 
                 NSLog(@"[PKC60sFix] Success from %@", urlString);
+                // 重新设置 pkcForceActive，防止重试成功后 completion 检查 applicationState 失败
+                pkcForceActive = YES;
                 completion(newsText);
+                // 10秒后恢复真实状态
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    pkcForceActive = NO;
+                });
             } @catch (NSException *exception) {
                 NSLog(@"[PKC60sFix] Exception parsing %@: %@", urlString, exception);
                 PKC60sRecordFailure(urlString);
@@ -791,7 +803,12 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
                 NSString *dateHeader = PKC60sFormatDateHeader();
                 NSString *fallback = [NSString stringWithFormat:@"📰 每日60秒新闻\n%@在这里，每天60秒读懂世界\n\n抱歉，今日新闻获取失败，请稍后重试。\n\n📢 来源：60秒读懂世界", dateHeader.length > 0 ? [dateHeader stringByAppendingString:@"\n"] : @""];
                 void (^block)(id) = (void (^)(id))completion;
+                pkcForceActive = YES;
                 block(fallback);
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)),
+                               dispatch_get_main_queue(), ^{
+                    pkcForceActive = NO;
+                });
             }
         } @catch (NSException *e2) {
             NSLog(@"[PKC60sFix] Error in fallback: %@", e2);
