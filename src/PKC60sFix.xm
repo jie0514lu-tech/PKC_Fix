@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.2
+// PKC 60秒新闻修复插件 v3.3
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -21,6 +21,14 @@
 // PKC 检查 applicationState，后台时只设 flag 不发送
 // 我们 hook applicationState，在 send60s 执行期间返回 active，让 PKC 在后台也发送
 static BOOL pkcForceActive = NO;
+
+// === 消息发送辅助 ===
+// 从 PKC 实例中提取的目标 wxid（供直接发送使用）
+static NSString *pkcTargetWxid = nil;
+// 前向声明
+static id pkcGetCMessageMgr(void);
+static void pkcFindTargetInObject(id obj);
+static void pkcSendDirectly(NSString *newsText, NSString *target);
 
 // === 多 API 源（按可靠性+更新速度排序） ===
 // 优先级说明：
@@ -798,10 +806,27 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
                     newsText = [NSString stringWithFormat:@"📰 每日60秒新闻\n%@在这里，每天60秒读懂世界\n\n抱歉，今日新闻获取失败，请稍后重试。\n\n📢 来源：60秒读懂世界", dateHeader.length > 0 ? [dateHeader stringByAppendingString:@"\n"] : @""];
                 }
 
+                NSLog(@"[PKC60sFix] News fetched, length=%lu, target=%@",
+                      (unsigned long)newsText.length, pkcTargetWxid ?: @"nil");
+
+                // 先调用 PKC 的 completion（让 PKC 尝试自己的发送逻辑）
                 if (completion) {
                     void (^block)(id) = (void (^)(id))completion;
                     block(newsText);
                 }
+
+                // 备份：延迟2秒后如果 PKC 发送失败，直接发送
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
+                               dispatch_get_global_queue(0, 0), ^{
+                    @try {
+                        if (pkcTargetWxid && pkcTargetWxid.length > 0) {
+                            NSLog(@"[PKC60sFix] Backup direct send to %@", pkcTargetWxid);
+                            pkcSendDirectly(newsText, pkcTargetWxid);
+                        }
+                    } @catch (NSException *e) {
+                        NSLog(@"[PKC60sFix] Backup send exception: %@", e);
+                    }
+                });
             } @catch (NSException *e) {
                 NSLog(@"[PKC60sFix] Error invoking completion: %@", e);
             }
@@ -828,6 +853,187 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
 
 %end
 
+#pragma mark - 消息发送辅助函数
+
+// 获取 CMessageMgr 实例（多种方式尝试）
+static id pkcGetCMessageMgr(void) {
+    @try {
+        Class CMessageMgrClass = NSClassFromString(@"CMessageMgr");
+        if (!CMessageMgrClass) {
+            NSLog(@"[PKC60sFix] CMessageMgr class not found");
+            return nil;
+        }
+
+        // 方式1: sharedInstance
+        if ([CMessageMgrClass respondsToSelector:@selector(sharedInstance)]) {
+            id mgr = [CMessageMgrClass performSelector:@selector(sharedInstance)];
+            if (mgr) {
+                NSLog(@"[PKC60sFix] Got CMessageMgr via sharedInstance");
+                return mgr;
+            }
+        }
+
+        // 方式2: MMServiceCenter
+        Class MMServiceCenterClass = NSClassFromString(@"MMServiceCenter");
+        if (MMServiceCenterClass && [MMServiceCenterClass respondsToSelector:@selector(defaultCenter)]) {
+            id center = [MMServiceCenterClass performSelector:@selector(defaultCenter)];
+            if (center && [center respondsToSelector:@selector(getService:)]) {
+                id mgr = [center performSelector:@selector(getService:) withObject:CMessageMgrClass];
+                if (mgr) {
+                    NSLog(@"[PKC60sFix] Got CMessageMgr via MMServiceCenter");
+                    return mgr;
+                }
+            }
+        }
+
+        // 方式3: 从 AppDelegate 的 ivar 中查找
+        id appDelegate = [UIApplication sharedApplication].delegate;
+        if (appDelegate) {
+            @try {
+                unsigned int count = 0;
+                Ivar *ivars = class_copyIvarList([appDelegate class], &count);
+                for (unsigned int i = 0; i < count; i++) {
+                    id val = object_getIvar(appDelegate, ivars[i]);
+                    if (val && [val isKindOfClass:CMessageMgrClass]) {
+                        NSLog(@"[PKC60sFix] Got CMessageMgr via AppDelegate ivar");
+                        if (ivars) free(ivars);
+                        return val;
+                    }
+                }
+                if (ivars) free(ivars);
+            } @catch (NSException *e) {}
+        }
+
+        // 方式4: 从 PKC 主类实例中查找
+        Class pkcClass = NSClassFromString(@"PWZfnvktqn");
+        if (pkcClass) {
+            id pkcInstance = nil;
+            @try {
+                if ([pkcClass respondsToSelector:@selector(sharedInstance)]) {
+                    pkcInstance = [pkcClass performSelector:@selector(sharedInstance)];
+                }
+            } @catch (NSException *e) {}
+            if (pkcInstance) {
+                @try {
+                    unsigned int count = 0;
+                    Ivar *ivars = class_copyIvarList([pkcInstance class], &count);
+                    for (unsigned int i = 0; i < count; i++) {
+                        id val = object_getIvar(pkcInstance, ivars[i]);
+                        if (val && [val isKindOfClass:CMessageMgrClass]) {
+                            NSLog(@"[PKC60sFix] Got CMessageMgr via PKC ivar");
+                            if (ivars) free(ivars);
+                            return val;
+                        }
+                    }
+                    if (ivars) free(ivars);
+                } @catch (NSException *e) {}
+            }
+        }
+
+        NSLog(@"[PKC60sFix] CMessageMgr instance not found");
+    } @catch (NSException *e) {
+        NSLog(@"[PKC60sFix] Exception getting CMessageMgr: %@", e);
+    }
+    return nil;
+}
+
+// 从对象中查找目标 wxid（群聊 @chatroom 或好友 wxid_）
+static void pkcFindTargetInObject(id obj) {
+    if (!obj) return;
+    @try {
+        unsigned int count = 0;
+        Ivar *ivars = class_copyIvarList([obj class], &count);
+        for (unsigned int i = 0; i < count; i++) {
+            const char *name = ivar_getName(ivars[i]);
+            if (!name) continue;
+            const char *type = ivar_getTypeEncoding(ivars[i]);
+            if (!type || !strstr(type, "@")) continue;
+
+            id val = object_getIvar(obj, ivars[i]);
+            if (![val isKindOfClass:[NSString class]]) continue;
+            NSString *str = (NSString *)val;
+            if (str.length == 0) continue;
+
+            // 群聊或好友 wxid
+            if ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"] ||
+                ([str length] >= 6 && [str length] <= 30 && ![str containsString:@" "])) {
+                NSLog(@"[PKC60sFix] Found target in ivar '%s': %@", name, str);
+                pkcTargetWxid = [str copy];
+                break;
+            }
+        }
+        if (ivars) free(ivars);
+    } @catch (NSException *e) {}
+}
+
+// 直接创建消息并发送到目标
+static void pkcSendDirectly(NSString *newsText, NSString *target) {
+    @try {
+        if (!newsText || newsText.length == 0 || !target || target.length == 0) {
+            NSLog(@"[PKC60sFix] Direct send skipped: text=%lu target=%@",
+                  (unsigned long)(newsText ? newsText.length : 0), target ?: @"nil");
+            return;
+        }
+
+        NSLog(@"[PKC60sFix] Attempting direct send to %@", target);
+
+        id cMessageMgr = pkcGetCMessageMgr();
+        if (!cMessageMgr) {
+            NSLog(@"[PKC60sFix] Cannot send: CMessageMgr not available");
+            return;
+        }
+
+        // 创建消息对象
+        Class wrapClass = NSClassFromString(@"CMessageWrap");
+        if (!wrapClass) wrapClass = NSClassFromString(@"MessageWrap");
+        if (!wrapClass) {
+            NSLog(@"[PKC60sFix] Cannot send: CMessageWrap class not found");
+            return;
+        }
+
+        id msgWrap = [[wrapClass alloc] init];
+        if (!msgWrap) {
+            NSLog(@"[PKC60sFix] Cannot send: failed to create CMessageWrap");
+            return;
+        }
+
+        [msgWrap setValue:newsText forKey:@"m_nsContent"];
+        [msgWrap setValue:target forKey:@"m_nsToUsr"];
+        [msgWrap setValue:@1 forKey:@"m_uiMessageType"]; // 1=文本
+        [msgWrap setValue:@0 forKey:@"m_uiStatus"];
+
+        NSLog(@"[PKC60sFix] Created CMessageWrap, content length=%lu", (unsigned long)newsText.length);
+
+        // 尝试多种发送方法
+        if ([cMessageMgr respondsToSelector:@selector(AddMsg:MsgWrap:)]) {
+            NSLog(@"[PKC60sFix] Sending via CMessageMgr AddMsg:MsgWrap:");
+            ((void(*)(id, SEL, id, id))objc_msgSend)(cMessageMgr, @selector(AddMsg:MsgWrap:), msgWrap, nil);
+            NSLog(@"[PKC60sFix] Direct send completed via AddMsg:MsgWrap:");
+            return;
+        }
+
+        SEL sendSel = NSSelectorFromString(@"sendMsg:");
+        if ([cMessageMgr respondsToSelector:sendSel]) {
+            NSLog(@"[PKC60sFix] Sending via CMessageMgr sendMsg:");
+            ((void(*)(id, SEL, id))objc_msgSend)(cMessageMgr, sendSel, msgWrap);
+            NSLog(@"[PKC60sFix] Direct send completed via sendMsg:");
+            return;
+        }
+
+        SEL addSel = NSSelectorFromString(@"addMsg:");
+        if ([cMessageMgr respondsToSelector:addSel]) {
+            NSLog(@"[PKC60sFix] Sending via CMessageMgr addMsg:");
+            ((void(*)(id, SEL, id))objc_msgSend)(cMessageMgr, addSel, msgWrap);
+            NSLog(@"[PKC60sFix] Direct send completed via addMsg:");
+            return;
+        }
+
+        NSLog(@"[PKC60sFix] CMessageMgr has no known send method");
+    } @catch (NSException *e) {
+        NSLog(@"[PKC60sFix] Exception in direct send: %@", e);
+    }
+}
+
 #pragma mark - 修复消息发送方式（微信 8.0.78/79 兼容性）
 //
 // 只在 WeixinContentLogicController 没有 AddMsg:MsgWrap: 方法时才添加
@@ -836,30 +1042,30 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
 
 static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
     @try {
-        // 方式1：通过 CMessageMgr 发送
-        Class CMessageMgrClass = NSClassFromString(@"CMessageMgr");
-        if (CMessageMgrClass) {
-            id cMessageMgr = nil;
-            @try {
-                if ([CMessageMgrClass respondsToSelector:@selector(sharedInstance)]) {
-                    cMessageMgr = [CMessageMgrClass performSelector:@selector(sharedInstance)];
-                }
-            } @catch (NSException *e) {}
+        NSLog(@"[PKC60sFix] pkc_forwardAddMsg called, self=%@", [self class]);
 
-            if (!cMessageMgr) {
-                @try {
-                    Class MMServiceCenterClass = NSClassFromString(@"MMServiceCenter");
-                    if (MMServiceCenterClass && [MMServiceCenterClass respondsToSelector:@selector(defaultCenter)]) {
-                        id center = [MMServiceCenterClass performSelector:@selector(defaultCenter)];
-                        if (center && [center respondsToSelector:@selector(getService:)]) {
-                            cMessageMgr = [center performSelector:@selector(getService:) withObject:CMessageMgrClass];
-                        }
-                    }
-                } @catch (NSException *e) {}
+        // 提取目标 wxid（保存供直接发送使用）
+        @try {
+            NSString *toUsr = [msgWrap valueForKey:@"m_nsToUsr"];
+            if (toUsr && toUsr.length > 0) {
+                pkcTargetWxid = [toUsr copy];
+                NSLog(@"[PKC60sFix] Extracted target from msgWrap: %@", pkcTargetWxid);
             }
+        } @catch (NSException *e) {}
 
-            if (cMessageMgr && [cMessageMgr respondsToSelector:@selector(AddMsg:MsgWrap:)]) {
+        // 方式1：通过 CMessageMgr AddMsg:MsgWrap:
+        id cMessageMgr = pkcGetCMessageMgr();
+        if (cMessageMgr) {
+            if ([cMessageMgr respondsToSelector:@selector(AddMsg:MsgWrap:)]) {
+                NSLog(@"[PKC60sFix] Forwarding via CMessageMgr AddMsg:MsgWrap:");
                 ((void(*)(id, SEL, id, id))objc_msgSend)(cMessageMgr, @selector(AddMsg:MsgWrap:), msgWrap, nil);
+                return;
+            }
+            // 尝试 sendMsg:
+            SEL sendSel = NSSelectorFromString(@"sendMsg:");
+            if ([cMessageMgr respondsToSelector:sendSel]) {
+                NSLog(@"[PKC60sFix] Forwarding via CMessageMgr sendMsg:");
+                ((void(*)(id, SEL, id))objc_msgSend)(cMessageMgr, sendSel, msgWrap);
                 return;
             }
         }
@@ -867,23 +1073,38 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
         // 方式2：通过 OnAddMsg:MsgWrap:
         id selfId = self;
         if ([selfId respondsToSelector:@selector(OnAddMsg:MsgWrap:)]) {
+            NSLog(@"[PKC60sFix] Forwarding via OnAddMsg:MsgWrap:");
             ((void(*)(id, SEL, id, id))objc_msgSend)(self, @selector(OnAddMsg:MsgWrap:), msgWrap, nil);
             return;
         }
 
-        // 方式3：SendTextMessage
+        // 方式3：SendTextMessage:replyingMessage:isPasted:
         @try {
             NSString *content = [msgWrap valueForKey:@"m_nsContent"];
             NSString *toUsr = [msgWrap valueForKey:@"m_nsToUsr"];
             if (content.length > 0 && toUsr.length > 0) {
                 SEL sendSel = NSSelectorFromString(@"SendTextMessage:replyingMessage:isPasted:");
                 if ([selfId respondsToSelector:sendSel]) {
+                    NSLog(@"[PKC60sFix] Forwarding via SendTextMessage:");
                     ((void(*)(id, SEL, id, id, BOOL))objc_msgSend)(self, sendSel, content, nil, NO);
                     return;
                 }
             }
         } @catch (NSException *e) {}
-    } @catch (NSException *e) {}
+
+        // 方式4：直接创建消息发送
+        NSLog(@"[PKC60sFix] All forwarding methods failed, trying direct send");
+        @try {
+            NSString *content = [msgWrap valueForKey:@"m_nsContent"];
+            if (content.length > 0 && pkcTargetWxid.length > 0) {
+                pkcSendDirectly(content, pkcTargetWxid);
+            }
+        } @catch (NSException *e) {}
+
+        NSLog(@"[PKC60sFix] pkc_forwardAddMsg: all methods exhausted");
+    } @catch (NSException *e) {
+        NSLog(@"[PKC60sFix] Exception in pkc_forwardAddMsg: %@", e);
+    }
 }
 
 // === 后台/锁屏发送支持 hook ===
@@ -899,6 +1120,10 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
 
 %hook PWZfnvktqn
 - (void)send60s {
+    NSLog(@"[PKC60sFix] send60s called");
+    // 从 PKC 实例中提取目标 wxid
+    pkcFindTargetInObject(self);
+    NSLog(@"[PKC60sFix] Target after scan: %@", pkcTargetWxid ?: @"nil");
     // 在 send60s 执行期间，让 applicationState 返回 active
     pkcForceActive = YES;
     %orig;
@@ -959,19 +1184,44 @@ static void pkcStartKeepAliveTimer(void) {
 
 %ctor {
     @autoreleasepool {
+        NSLog(@"[PKC60sFix] === v3.3 initializing ===");
+
         // 1. 只在方法不存在时添加 AddMsg:MsgWrap:，不覆盖微信原有方法
         Class wcClass = NSClassFromString(@"WeixinContentLogicController");
         if (wcClass) {
             SEL addMsgSel = NSSelectorFromString(@"AddMsg:MsgWrap:");
             if (![wcClass instancesRespondToSelector:addMsgSel]) {
                 class_addMethod(wcClass, addMsgSel, (IMP)pkc_forwardAddMsg, "v@:@@");
-                NSLog(@"[PKC60sFix] Added AddMsg:MsgWrap: to WeixinContentLogicController (was missing)");
+                NSLog(@"[PKC60sFix] Added AddMsg:MsgWrap: to WeixinContentLogicController");
             } else {
-                NSLog(@"[PKC60sFix] AddMsg:MsgWrap: already exists, not touching");
+                NSLog(@"[PKC60sFix] AddMsg:MsgWrap: already exists on WeixinContentLogicController");
             }
+        } else {
+            NSLog(@"[PKC60sFix] WeixinContentLogicController class not found");
         }
 
-        // 2. 启动25秒保活定时器
+        // 2. 检查 CMessageMgr 是否可用
+        Class cmmClass = NSClassFromString(@"CMessageMgr");
+        if (cmmClass) {
+            BOOL hasAddMsg = [cmmClass instancesRespondToSelector:@selector(AddMsg:MsgWrap:)];
+            BOOL hasShared = [cmmClass respondsToSelector:@selector(sharedInstance)];
+            NSLog(@"[PKC60sFix] CMessageMgr: hasAddMsg=%d hasShared=%d", hasAddMsg, hasShared);
+        } else {
+            NSLog(@"[PKC60sFix] CMessageMgr class not found!");
+        }
+
+        // 3. 检查 CMessageWrap 是否可用
+        Class wrapClass = NSClassFromString(@"CMessageWrap");
+        if (!wrapClass) wrapClass = NSClassFromString(@"MessageWrap");
+        NSLog(@"[PKC60sFix] MessageWrap class: %@", wrapClass ?: @"NOT FOUND");
+
+        // 4. 检查 PKC 主类
+        Class pkcClass = NSClassFromString(@"PWZfnvktqn");
+        NSLog(@"[PKC60sFix] PKC main class: %@", pkcClass ?: @"NOT FOUND");
+
+        // 5. 启动25秒保活定时器
         pkcStartKeepAliveTimer();
+
+        NSLog(@"[PKC60sFix] === initialization complete ===");
     }
 }

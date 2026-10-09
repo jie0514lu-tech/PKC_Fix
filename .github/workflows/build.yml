@@ -172,15 +172,17 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: github.ref == 'refs/heads/main'
       with:
-        tag_name: v3.2-fixed
+        tag_name: v3.3-fixed
         name: PKC 0.9-9 Beta1 Fixed
         body: |
-          ## PKC 完整修复版 v3.2
+          ## PKC 完整修复版 v3.3
           1. 60秒新闻只发标题/空白/乱码 → 多API源自动回退+正确JSON解析
-          2. 微信8.0.78/79消息发送方式变化 → 为WeixinContentLogicController添加AddMsg:MsgWrap:转发到CMessageMgr
-          3. 修复花括号不平衡导致编译失败
-          4. 修复ARC下retain/release编译错误
-          5. 修复tryNextAPI递归调用需要__block限定符
+          2. 微信8.0.78/79消息发送方式变化 → 多路径发送(CMessageMgr/OnAddMsg/SendTextMessage/直接创建)
+          3. 添加直接发送备份：get60s完成后2秒自动尝试直接发送到目标
+          4. 从PKC实例ivars自动提取目标wxid(@chatroom/wxid_)
+          5. 4种方式获取CMessageMgr实例(sharedInstance/MMServiceCenter/AppDelegate/PKC)
+          6. 全面日志诊断：可查看发送链路每一步状态
+          7. 修复编译错误(花括号/ARC/NSCalendar/__block)
 
           直接注入此 deb 到微信 IPA，包含原始 PKC 所有功能 + 60秒新闻修复
         files: PKC_0.9-9-Beta1-Fixed.deb

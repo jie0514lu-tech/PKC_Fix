@@ -55,7 +55,15 @@ make package
 
 ## 版本历史
 
-### v3.2（当前版本）
+### v3.3（当前版本）
+- 修复"提示成功却不发送"问题：PKC 发送链路在微信8.0.78/79失效
+- 新增直接发送备份：get60s完成后2秒自动尝试通过CMessageMgr直接发送
+- 新增4种方式获取CMessageMgr实例（sharedInstance/MMServiceCenter/AppDelegate ivar/PKC ivar）
+- 新增从PKC实例ivars自动提取目标wxid（@chatroom/wxid_格式）
+- pkc_forwardAddMsg增加sendMsg:/addMsg:回退方法+日志诊断
+- %ctor增加启动诊断日志（检查关键类和方法是否存在）
+
+### v3.2
 - 修复花括号不平衡导致 `%hook does not make sense inside a block` 编译失败（PKC60sIsNewsFresh 函数缺少 @try 和函数闭合花括号）
 - 修复 ARC 模式下 `retain`/`release` 编译错误（改用 ARC 自动管理）
 - 修复 `tryNextAPI` 递归块调用缺少 `__block` 限定符导致 API 回退逻辑失效
