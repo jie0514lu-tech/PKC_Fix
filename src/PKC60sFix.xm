@@ -279,7 +279,7 @@ static NSString *PKC60sFormatDateHeader(void) {
         @try {
             NSCalendar *chineseCalendar = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierChinese];
             [chineseCalendar setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"zh_CN"]];
-            NSDateComponents *lunarComps = [chineseCalendar componentsFromDate:now];
+            NSDateComponents *lunarComps = [chineseCalendar components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:now];
 
             // 农历天干地支年份
             NSInteger lunarYear = [lunarComps year];
