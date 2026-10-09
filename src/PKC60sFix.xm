@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v1.6
+// PKC 60秒新闻修复插件 v1.8
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -119,7 +119,6 @@ static void PKC60sSaveNewsHash(NSString *newsText) {
         NSString *hash = [NSString stringWithFormat:@"%lu|%@|%@", (unsigned long)contentToHash.length, head, tail];
 
         [[NSUserDefaults standardUserDefaults] setObject:hash forKey:@"pkc60s_last_news_hash"];
-        [[NSUserDefaults standardUserDefaults] synchronize];
     } @catch (NSException *e) {}
 }
 
@@ -868,35 +867,5 @@ static void pkcStartKeepAliveTimer(void) {
 
         // 2. 启动25秒保活定时器
         pkcStartKeepAliveTimer();
-
-        // 3. 尝试 hook PKC 的 minuteInterval 为5秒
-        // PKC 的类名做了混淆，用 runtime 遍历找到含 minuteInterval 属性的类
-        @try {
-            unsigned int classCount = 0;
-            Class *classes = objc_copyClassList(&classCount);
-            for (unsigned int i = 0; i < classCount; i++) {
-                Class cls = classes[i];
-                objc_property_t prop = class_getProperty(cls, "minuteInterval");
-                if (prop) {
-                    // 找到拥有 minuteInterval 的类，设置默认值为5
-                    id instance = nil;
-                    @try {
-                        instance = [cls performSelector:@selector(sharedInstance)];
-                    } @catch (NSException *e) {}
-                    @try {
-                        instance = [cls performSelector:@selector(pkc)];
-                    } @catch (NSException *e) {}
-
-                    if (instance) {
-                        @try {
-                            [instance setValue:@5 forKey:@"minuteInterval"];
-                            NSLog(@"[PKC60sFix] Set minuteInterval to 5 on %@", NSStringFromClass(cls));
-                        } @catch (NSException *e) {}
-                    }
-                    break;
-                }
-            }
-            free(classes);
-        } @catch (NSException *e) {}
     }
 }
