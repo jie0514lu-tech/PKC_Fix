@@ -96,6 +96,56 @@ static void PKC60sRecordSuccess(NSString *urlString) {
     } @catch (NSException *e) {}
 }
 
+// === 内容比对：防止"今天日期+昨天内容" ===
+// 保存上次的新闻内容，比对是否重复
+
+static NSString *PKC60sGetLastNewsHash(void) {
+    @try {
+        return [[NSUserDefaults standardUserDefaults] stringForKey:@"pkc60s_last_news_hash"];
+    } @catch (NSException *e) {}
+    return nil;
+}
+
+static void PKC60sSaveNewsHash(NSString *newsText) {
+    @try {
+        // 取新闻正文的前500字做哈希（排除日期头，因为日期每天不同）
+        NSString *contentToHash = newsText;
+        if (newsText.length > 500) {
+            contentToHash = [newsText substringFromIndex:newsText.length - 500];
+        }
+        // 简单哈希：取前500字的长度+首尾各50字拼接
+        NSString *head = contentToHash.length > 50 ? [contentToHash substringToIndex:50] : contentToHash;
+        NSString *tail = contentToHash.length > 50 ? [contentToHash substringFromIndex:contentToHash.length - 50] : contentToHash;
+        NSString *hash = [NSString stringWithFormat:@"%lu|%@|%@", (unsigned long)contentToHash.length, head, tail];
+
+        [[NSUserDefaults standardUserDefaults] setObject:hash forKey:@"pkc60s_last_news_hash"];
+        [[NSUserDefaults standardUserDefaults] synchronize];
+    } @catch (NSException *e) {}
+}
+
+// 检查新闻内容是否和上次重复
+static BOOL PKC60sIsContentDuplicate(NSString *newsText) {
+    @try {
+        NSString *lastHash = PKC60sGetLastNewsHash();
+        if (!lastHash || lastHash.length == 0) return NO; // 没有上次记录，不判断
+
+        // 计算当前新闻的哈希
+        NSString *contentToHash = newsText;
+        if (newsText.length > 500) {
+            contentToHash = [newsText substringFromIndex:newsText.length - 500];
+        }
+        NSString *head = contentToHash.length > 50 ? [contentToHash substringToIndex:50] : contentToHash;
+        NSString *tail = contentToHash.length > 50 ? [contentToHash substringFromIndex:contentToHash.length - 50] : contentToHash;
+        NSString *currentHash = [NSString stringWithFormat:@"%lu|%@|%@", (unsigned long)contentToHash.length, head, tail];
+
+        if ([currentHash isEqualToString:lastHash]) {
+            NSLog(@"[PKC60sFix] Content duplicate detected (same as last sent)");
+            return YES; // 内容重复
+        }
+    } @catch (NSException *e) {}
+    return NO;
+}
+
 // === 日期新鲜度检查 ===
 // 检查新闻日期是否是今天（防止发送昨天的重复新闻）
 static BOOL PKC60sIsNewsFresh(NSString *newsText, NSDictionary *json) {
@@ -392,6 +442,18 @@ static NSString *PKC60sFormatDateHeader(void) {
 
                 // 成功！重置失败计数
                 PKC60sRecordSuccess(urlString);
+
+                // 内容比对：检查是否和上次发送的重复
+                if (PKC60sIsContentDuplicate(newsText)) {
+                    NSLog(@"[PKC60sFix] API %@ content is duplicate (same as last sent), trying next", urlString);
+                    PKC60sRecordFailure(urlString);
+                    tryNextAPI();
+                    return;
+                }
+
+                // 保存当前内容哈希供下次比对
+                PKC60sSaveNewsHash(newsText);
+
                 NSLog(@"[PKC60sFix] Success from %@", urlString);
                 completion(newsText);
             } @catch (NSException *exception) {
@@ -743,7 +805,8 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
     } @catch (NSException *e) {}
 }
 
-// === 5秒保活定时器 ===
+// === 25秒保活定时器 ===
+// iOS 每次给约30秒后台时间，25秒申请一次刚好续上，不浪费
 static dispatch_source_t pkcKeepAliveTimer = nil;
 static UIBackgroundTaskIdentifier pkcLastBgTask = UIBackgroundTaskInvalid;
 
@@ -769,11 +832,7 @@ static void pkcKeepAliveFire(void) {
                     }
                 } @catch (NSException *e) {}
             }];
-
-            NSLog(@"[PKC60sFix] Keepalive tick, remaining: %.1fs", [app backgroundTimeRemaining]);
-        } @catch (NSException *e) {
-            NSLog(@"[PKC60sFix] Keepalive error: %@", e);
-        }
+        } @catch (NSException *e) {}
     }
 }
 
@@ -782,15 +841,15 @@ static void pkcStartKeepAliveTimer(void) {
 
     pkcKeepAliveTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
     dispatch_source_set_timer(pkcKeepAliveTimer,
-                              dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC),
-                              5 * NSEC_PER_SEC,    // 每5秒触发
-                              1 * NSEC_PER_SEC);   // 允许1秒误差
+                              dispatch_time(DISPATCH_TIME_NOW, 25 * NSEC_PER_SEC),
+                              25 * NSEC_PER_SEC,   // 每25秒触发（iOS给30秒，25秒续上）
+                              5 * NSEC_PER_SEC);    // 允许5秒误差
     dispatch_source_set_event_handler(pkcKeepAliveTimer, ^{
         pkcKeepAliveFire();
     });
     dispatch_resume(pkcKeepAliveTimer);
 
-    NSLog(@"[PKC60sFix] 5-second keepalive timer started");
+    NSLog(@"[PKC60sFix] 25-second keepalive timer started");
 }
 
 %ctor {
@@ -807,7 +866,7 @@ static void pkcStartKeepAliveTimer(void) {
             }
         }
 
-        // 2. 启动5秒保活定时器
+        // 2. 启动25秒保活定时器
         pkcStartKeepAliveTimer();
 
         // 3. 尝试 hook PKC 的 minuteInterval 为5秒
