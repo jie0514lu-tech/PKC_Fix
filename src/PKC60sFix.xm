@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v2.0
+// PKC 60秒新闻修复插件 v2.1
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -353,7 +353,7 @@ static NSString *PKC60sFormatDateHeader(void) {
 static void (^pkcPendingCompletion)(NSString *) = nil;
 static dispatch_source_t pkcRetryTimer = nil;
 static NSInteger pkcRetryCount = 0;
-static const NSInteger PKC_MAX_RETRIES = 12; // 最多重试12次（6小时）
+static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时），覆盖一整天
 
 + (void)fetchNewsWithCompletion:(void (^)(NSString *newsText))completion {
     if (!completion) return;
