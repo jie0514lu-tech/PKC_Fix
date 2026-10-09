@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v1.9
+// PKC 60秒新闻修复插件 v2.0
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -348,20 +348,67 @@ static NSString *PKC60sFormatDateHeader(void) {
 
 @implementation PKC60sNewsFetcher
 
-+ (void)fetchNewsWithCompletion:(void (^)(NSString *))completion {
+// === 自动重试机制 ===
+// 当所有API都返回昨天的新闻时，30分钟后自动重试，直到获取到今天的新闻
+static void (^pkcPendingCompletion)(NSString *) = nil;
+static dispatch_source_t pkcRetryTimer = nil;
+static NSInteger pkcRetryCount = 0;
+static const NSInteger PKC_MAX_RETRIES = 12; // 最多重试12次（6小时）
+
++ (void)fetchNewsWithCompletion:(void (^)(NSString *newsText))completion {
     if (!completion) return;
+
+    // 取消之前的重试定时器（新的get60s:调用来了，重新开始）
+    if (pkcRetryTimer) {
+        dispatch_source_cancel(pkcRetryTimer);
+        pkcRetryTimer = nil;
+    }
 
     NSArray *apiList = PKC60sGetAPIList();
     __block NSInteger currentIndex = 0;
+    __block void (^localCompletion)(NSString *) = [completion copy];
 
     void (^tryNextAPI)(void) = nil;
     tryNextAPI = ^{
         if (currentIndex >= apiList.count) {
             // 所有 API 都失败了
             PKC60sRecordFailure(@"all");
-            NSString *dateHeader = PKC60sFormatDateHeader();
-            NSString *fallback = [NSString stringWithFormat:@"📰 每日60秒新闻\n%@在这里，每天60秒读懂世界\n\n抱歉，今日新闻获取失败，请稍后重试。\n\n📢 来源：60秒读懂世界", dateHeader.length > 0 ? [dateHeader stringByAppendingString:@"\n"] : @""];
-            completion(fallback);
+
+            // 检查是否还可以重试
+            if (pkcRetryCount < PKC_MAX_RETRIES) {
+                pkcRetryCount++;
+                NSLog(@"[PKC60sFix] All APIs failed, scheduling retry #%ld in 30 min", (long)pkcRetryCount);
+
+                // 保存 completion block，30分钟后重试
+                pkcPendingCompletion = [localCompletion retain];
+
+                pkcRetryTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
+                dispatch_source_set_timer(pkcRetryTimer,
+                                          dispatch_time(DISPATCH_TIME_NOW, (int64_t)(30 * 60 * NSEC_PER_SEC)),
+                                          30 * 60 * NSEC_PER_SEC, 60 * NSEC_PER_SEC);
+                dispatch_source_set_event_handler(pkcRetryTimer, ^{
+                    // 重试：重新获取新闻
+                    if (pkcPendingCompletion) {
+                        void (^retryCompletion)(NSString *) = [pkcPendingCompletion retain];
+                        [pkcPendingCompletion release];
+                        pkcPendingCompletion = nil;
+                        dispatch_source_cancel(pkcRetryTimer);
+                        pkcRetryTimer = nil;
+
+                        // 重新调用 fetchNewsWithCompletion
+                        [self fetchNewsWithCompletion:retryCompletion];
+                        [retryCompletion release];
+                    }
+                });
+                dispatch_resume(pkcRetryTimer);
+            } else {
+                // 超过最大重试次数，发送 fallback
+                NSLog(@"[PKC60sFix] Max retries reached, sending fallback");
+                pkcRetryCount = 0;
+                NSString *dateHeader = PKC60sFormatDateHeader();
+                NSString *fallback = [NSString stringWithFormat:@"📰 每日60秒新闻\n%@在这里，每天60秒读懂世界\n\n抱歉，今日新闻获取失败，请稍后重试。\n\n📢 来源：60秒读懂世界", dateHeader.length > 0 ? [dateHeader stringByAppendingString:@"\n"] : @""];
+                localCompletion(fallback);
+            }
             return;
         }
 
@@ -439,8 +486,9 @@ static NSString *PKC60sFormatDateHeader(void) {
                     }
                 }
 
-                // 成功！重置失败计数
+                // 成功！重置失败计数和重试计数
                 PKC60sRecordSuccess(urlString);
+                pkcRetryCount = 0;
 
                 // 内容比对：检查是否和上次发送的重复
                 if (PKC60sIsContentDuplicate(newsText)) {

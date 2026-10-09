@@ -172,7 +172,7 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: github.ref == 'refs/heads/main'
       with:
-        tag_name: v1.9-fixed
+        tag_name: v2.0-fixed
         name: PKC 0.9-9 Beta1 Fixed
         body: |
           ## PKC 完整修复版
