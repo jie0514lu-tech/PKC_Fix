@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.1
+// PKC 60秒新闻修复插件 v3.2
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
