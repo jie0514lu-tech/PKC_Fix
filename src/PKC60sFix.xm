@@ -247,6 +247,13 @@ static BOOL PKC60sIsNewsFresh(NSString *newsText, NSDictionary *json) {
             return YES;
         }
 
+        // 既没有 json 也没有 newsText，默认新鲜
+        return YES;
+    } @catch (NSException *e) {
+        return YES; // 异常时默认通过，避免阻断发送
+    }
+}
+
 #pragma mark - 日期/星期/农历格式化
 
 // 获取格式化的日期头（公历+星期+农历）
@@ -373,7 +380,7 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
     __block NSInteger currentIndex = 0;
     __block void (^localCompletion)(NSString *) = [completion copy];
 
-    void (^tryNextAPI)(void) = nil;
+    __block void (^tryNextAPI)(void) = nil;
     tryNextAPI = ^{
         if (currentIndex >= apiList.count) {
             // 所有 API 都失败了
@@ -384,8 +391,8 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
                 pkcRetryCount++;
                 NSLog(@"[PKC60sFix] All APIs failed, scheduling retry #%ld in 30 min", (long)pkcRetryCount);
 
-                // 保存 completion block，30分钟后重试
-                pkcPendingCompletion = [localCompletion retain];
+                // 保存 completion block，30分钟后重试（ARC 自动 retain）
+                pkcPendingCompletion = localCompletion;
 
                 pkcRetryTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0));
                 dispatch_source_set_timer(pkcRetryTimer,
@@ -394,15 +401,13 @@ static const NSInteger PKC_MAX_RETRIES = 48; // 最多重试48次（24小时）�
                 dispatch_source_set_event_handler(pkcRetryTimer, ^{
                     // 重试：重新获取新闻
                     if (pkcPendingCompletion) {
-                        void (^retryCompletion)(NSString *) = [pkcPendingCompletion retain];
-                        [pkcPendingCompletion release];
+                        void (^retryCompletion)(NSString *) = pkcPendingCompletion;
                         pkcPendingCompletion = nil;
                         dispatch_source_cancel(pkcRetryTimer);
                         pkcRetryTimer = nil;
 
                         // 重新调用 fetchNewsWithCompletion
                         [self fetchNewsWithCompletion:retryCompletion];
-                        [retryCompletion release];
                     }
                 });
                 dispatch_resume(pkcRetryTimer);

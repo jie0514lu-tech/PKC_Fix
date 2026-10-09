@@ -55,7 +55,13 @@ make package
 
 ## 版本历史
 
-### v3.1（当前版本）
+### v3.2（当前版本）
+- 修复花括号不平衡导致 `%hook does not make sense inside a block` 编译失败（PKC60sIsNewsFresh 函数缺少 @try 和函数闭合花括号）
+- 修复 ARC 模式下 `retain`/`release` 编译错误（改用 ARC 自动管理）
+- 修复 `tryNextAPI` 递归块调用缺少 `__block` 限定符导致 API 回退逻辑失效
+- 修复 PKC60sIsNewsFresh 函数缺少默认返回值
+
+### v3.1
 - 修复编译错误：pkcForceActive 声明移到文件顶部，解决 Logos 预处理器 "%hook does not make sense inside a block" 错误
 
 ### v3.0
