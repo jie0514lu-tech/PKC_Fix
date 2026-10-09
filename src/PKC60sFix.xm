@@ -16,24 +16,159 @@
 //
 // 所有操作包裹 @try/@catch 防止闪退
 
-// === 多 API 源（按优先级排序，自动回退） ===
-// text 格式优先（已包含完整格式：日期/星期/农历/新闻/微语/来源）
+// === 多 API 源（按可靠性+更新速度排序） ===
+// 优先级说明：
+//   1. viki.moe text  — 主数据源，每天凌晨2-4点更新，text格式含完整日期/农历
+//   2. viki.moe JSON  — 同源JSON回退，有update时间戳可校验
+//   3. qqsuu.cn       — 通常镜像viki.moe，中等可靠
+//   4. oioweb.cn      — 有时延迟但通常可用
+//   5. auth.top       — 需key，中等可靠
+//   6. 03c3.cn        — 不稳定，有时宕机
+//   7. lbbb.cc/60s    — 原始PKC源，已知不可靠（超时/只返回标题）
+//   8. lbbb.cc/60miao — 最后兜底，通常只有标题
 static NSArray *PKC60sGetAPIList(void) {
     static NSArray *list = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         list = @[
-            @"https://60s.viki.moe/v2/60s?format=text",   // text格式，完整内容
-            @"https://60s.viki.moe/v2/60s",                 // JSON格式，回退
-            @"https://api.auth.top/api/60s?format=json&key=9bf3ef53ef0060b5",
+            @"https://60s.viki.moe/v2/60s?format=text",
+            @"https://60s.viki.moe/v2/60s",
             @"https://api.qqsuu.cn/api/dm-60s",
             @"https://api.oioweb.cn/api/common/60s",
+            @"https://api.auth.top/api/60s?format=json&key=9bf3ef53ef0060b5",
             @"https://api.03c3.cn/api/zb",
             @"https://api.lbbb.cc/api/60s",
             @"https://api.lbbb.cc/api/60miao"
         ];
     });
     return list;
+}
+
+// === 失败追踪：记录每个API的连续失败次数和上次失败时间 ===
+static NSMutableDictionary *PKC60sGetFailureMap(void) {
+    static NSMutableDictionary *map = nil;
+    static dispatch_once_t onceToken;
+    dispatch_once(&onceToken, ^{
+        map = [NSMutableDictionary dictionary];
+    });
+    return map;
+}
+
+// 检查API是否应该跳过（连续失败3次以上且30分钟内）
+static BOOL PKC60sShouldSkipAPI(NSString *urlString) {
+    @try {
+        NSMutableDictionary *map = PKC60sGetFailureMap();
+        NSDictionary *info = map[urlString];
+        if (!info) return NO;
+        NSInteger failCount = [info[@"failCount"] integerValue];
+        NSDate *lastFail = info[@"lastFailDate"];
+        if (failCount >= 3 && lastFail) {
+            NSTimeInterval elapsed = [[NSDate date] timeIntervalSinceDate:lastFail];
+            if (elapsed < 1800) { // 30分钟内跳过
+                NSLog(@"[PKC60sFix] Skipping %@ (failed %ld times, %.0f min ago)", urlString, (long)failCount, elapsed / 60.0);
+                return YES;
+            }
+            // 超过30分钟，重置计数
+            [map removeObjectForKey:urlString];
+        }
+    } @catch (NSException *e) {}
+    return NO;
+}
+
+// 记录API失败
+static void PKC60sRecordFailure(NSString *urlString) {
+    @try {
+        NSMutableDictionary *map = PKC60sGetFailureMap();
+        NSMutableDictionary *info = [map[urlString] mutableCopy] ?: [NSMutableDictionary dictionary];
+        NSInteger count = [info[@"failCount"] integerValue];
+        info[@"failCount"] = @(count + 1);
+        info[@"lastFailDate"] = [NSDate date];
+        map[urlString] = info;
+    } @catch (NSException *e) {}
+}
+
+// 记录API成功（重置失败计数）
+static void PKC60sRecordSuccess(NSString *urlString) {
+    @try {
+        NSMutableDictionary *map = PKC60sGetFailureMap();
+        [map removeObjectForKey:urlString];
+    } @catch (NSException *e) {}
+}
+
+// === 日期新鲜度检查 ===
+// 检查新闻日期是否是今天（防止发送昨天的重复新闻）
+static BOOL PKC60sIsNewsFresh(NSString *newsText, NSDictionary *json) {
+    @try {
+        NSDate *now = [NSDate date];
+        NSCalendar *cal = [[NSCalendar alloc] initWithCalendarIdentifier:NSCalendarIdentifierGregorian];
+        [cal setLocale:[[NSLocale alloc] initWithLocaleIdentifier:@"zh_CN"]];
+        NSDateComponents *comps = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:now];
+        NSInteger todayYear = [comps year];
+        NSInteger todayMonth = [comps month];
+        NSInteger todayDay = [comps day];
+
+        // 方式1：检查JSON中的date/update字段
+        if (json) {
+            NSDictionary *dataDict = json[@"data"];
+            if (![dataDict isKindOfClass:[NSDictionary class]]) dataDict = json;
+
+            // 检查 date 字段 (如 "2026-10-09")
+            NSString *dateStr = dataDict[@"date"];
+            if (dateStr.length > 0) {
+                // 格式: YYYY-MM-DD
+                if ([dateStr containsString:[NSString stringWithFormat:@"%ld-%ld-%ld", (long)todayYear, (long)todayMonth, (long)todayDay]]) {
+                    return YES;
+                }
+                // 格式: YYYY/MM/DD
+                NSString *altDateStr = [NSString stringWithFormat:@"%ld/%ld/%ld", (long)todayYear, (long)todayMonth, (long)todayDay];
+                if ([dateStr containsString:altDateStr]) {
+                    return YES;
+                }
+                // 如果日期不是今天，说明是旧数据
+                NSLog(@"[PKC60sFix] Stale news detected: date=%@, today=%ld-%ld-%ld", dateStr, (long)todayYear, (long)todayMonth, (long)todayDay);
+                return NO;
+            }
+
+            // 检查 update 字段 (通常包含时间戳或日期)
+            NSString *updateStr = dataDict[@"update"];
+            if (updateStr.length > 0) {
+                // 尝试解析 "2026-10-09 06:00:00" 格式
+                if ([updateStr containsString:[NSString stringWithFormat:@"%ld-%ld-%ld", (long)todayYear, (long)todayMonth, (long)todayDay]]) {
+                    return YES;
+                }
+                NSLog(@"[PKC60sFix] Stale news detected: update=%@", updateStr);
+                return NO;
+            }
+
+            // 检查 create_time 字段
+            NSString *createTime = dataDict[@"create_time"];
+            if (createTime.length > 0) {
+                if ([createTime containsString:[NSString stringWithFormat:@"%ld/%ld/%ld", (long)todayYear, (long)todayMonth, (long)todayDay]] ||
+                    [createTime containsString:[NSString stringWithFormat:@"%ld-%ld-%ld", (long)todayYear, (long)todayMonth, (long)todayDay]]) {
+                    return YES;
+                }
+            }
+        }
+
+        // 方式2：检查文本中是否包含今天的日期
+        if (newsText.length > 0) {
+            // 检查 "10月9日" 或 "10月09日" 格式
+            NSString *dateStr1 = [NSString stringWithFormat:@"%ld月%ld日", (long)todayMonth, (long)todayDay];
+            NSString *dateStr2 = [NSString stringWithFormat:@"%ld月%02ld日", (long)todayMonth, (long)todayDay];
+            if ([newsText containsString:dateStr1] || [newsText containsString:dateStr2]) {
+                return YES;
+            }
+            // 检查 "2026-10-09" 或 "2026/10/09" 格式
+            NSString *isoDate1 = [NSString stringWithFormat:@"%ld-%ld-%ld", (long)todayYear, (long)todayMonth, (long)todayDay];
+            NSString *isoDate2 = [NSString stringWithFormat:@"%ld/%ld/%ld", (long)todayYear, (long)todayMonth, (long)todayDay];
+            if ([newsText containsString:isoDate1] || [newsText containsString:isoDate2]) {
+                return YES;
+            }
+            // 如果文本里没有明确的日期，无法判断新鲜度，默认通过（总比没有好）
+            return YES;
+        }
+    } @catch (NSException *e) {}
+    return YES;
 }
 
 #pragma mark - 日期/星期/农历格式化
@@ -152,6 +287,7 @@ static NSString *PKC60sFormatDateHeader(void) {
     tryNextAPI = ^{
         if (currentIndex >= apiList.count) {
             // 所有 API 都失败了
+            PKC60sRecordFailure(@"all");
             NSString *dateHeader = PKC60sFormatDateHeader();
             NSString *fallback = [NSString stringWithFormat:@"📰 每日60秒新闻\n%@在这里，每天60秒读懂世界\n\n抱歉，今日新闻获取失败，请稍后重试。\n\n📢 来源：60秒读懂世界", dateHeader.length > 0 ? [dateHeader stringByAppendingString:@"\n"] : @""];
             completion(fallback);
@@ -162,21 +298,29 @@ static NSString *PKC60sFormatDateHeader(void) {
         BOOL isTextAPI = [urlString containsString:@"format=text"];
         currentIndex++;
 
+        // 检查是否应该跳过此API（连续失败3次且30分钟内）
+        if (PKC60sShouldSkipAPI(urlString)) {
+            tryNextAPI();
+            return;
+        }
+
         NSURL *url = [NSURL URLWithString:urlString];
         if (!url) {
+            PKC60sRecordFailure(urlString);
             tryNextAPI();
             return;
         }
 
         NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:url];
-        request.timeoutInterval = 20.0;
+        request.timeoutInterval = 10.0; // 缩短超时到10秒，加快回退
         [request setValue:@"Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148" forHTTPHeaderField:@"User-Agent"];
         [request setValue:isTextAPI ? @"text/plain" : @"application/json" forHTTPHeaderField:@"Accept"];
 
         NSURLSessionDataTask *task = [[NSURLSession sharedSession] dataTaskWithRequest:request completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
             @try {
                 if (error || !data) {
-                    NSLog(@"[PKC60sFix] API %@ failed: %@", urlString, error);
+                    NSLog(@"[PKC60sFix] API %@ failed: %@", urlString, error.localizedDescription);
+                    PKC60sRecordFailure(urlString);
                     tryNextAPI();
                     return;
                 }
@@ -184,19 +328,40 @@ static NSString *PKC60sFormatDateHeader(void) {
                 NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
                 if ([httpResp isKindOfClass:[NSHTTPURLResponse class]] && httpResp.statusCode != 200) {
                     NSLog(@"[PKC60sFix] API %@ HTTP status: %ld", urlString, (long)httpResp.statusCode);
+                    PKC60sRecordFailure(urlString);
                     tryNextAPI();
                     return;
                 }
 
+                // 解析新闻
                 NSString *newsText = [self parseNewsData:data isTextAPI:isTextAPI];
-                if (newsText.length > 20) {
-                    completion(newsText);
-                } else {
+                if (newsText.length <= 20) {
                     NSLog(@"[PKC60sFix] API %@ returned empty content", urlString);
+                    PKC60sRecordFailure(urlString);
                     tryNextAPI();
+                    return;
                 }
+
+                // 新鲜度检查：防止发送昨天的新闻
+                NSDictionary *json = nil;
+                @try {
+                    json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                } @catch (NSException *e) {}
+
+                if (!PKC60sIsNewsFresh(newsText, json)) {
+                    NSLog(@"[PKC60sFix] API %@ returned stale news (yesterday), trying next", urlString);
+                    PKC60sRecordFailure(urlString);
+                    tryNextAPI();
+                    return;
+                }
+
+                // 成功！重置失败计数
+                PKC60sRecordSuccess(urlString);
+                NSLog(@"[PKC60sFix] Success from %@", urlString);
+                completion(newsText);
             } @catch (NSException *exception) {
                 NSLog(@"[PKC60sFix] Exception parsing %@: %@", urlString, exception);
+                PKC60sRecordFailure(urlString);
                 tryNextAPI();
             }
         }];

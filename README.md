@@ -55,7 +55,14 @@ make package
 
 ## 版本历史
 
-### v1.3（当前版本）
+### v1.4（当前版本）
+- API 优先级重排：viki.moe text → viki.moe JSON → qqsuu → oioweb → auth.top → 03c3 → lbbb
+- 新增日期新鲜度检查：检查 JSON date/update 字段和文本中的日期，防止发送昨天的重复新闻
+- 新增失败追踪：API 连续失败 3 次后自动跳过 30 分钟，避免反复尝试不可用的 API
+- 超时从 20 秗缩短到 10 秒，加快 API 回退速度
+- 每步操作记录详细日志（哪个 API 成功/失败/跳过/旧闻检测）
+
+### v1.3
 - 优先使用 viki.moe text 格式 API，返回完整新闻格式（日期/星期/农历/新闻/微语/来源）
 - JSON 回退路径补充：公历日期、星期、农历（天干地支+生肖+月日）、节日检测、来源标注
 - 修复 lbbb.cc newslist 格式解析（提取 description/content 字段）
