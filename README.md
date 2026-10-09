@@ -55,7 +55,10 @@ make package
 
 ## 版本历史
 
-### v3.0（当前版本 - 最终版）
+### v3.1（当前版本）
+- 修复编译错误：pkcForceActive 声明移到文件顶部，解决 Logos 预处理器 "%hook does not make sense inside a block" 错误
+
+### v3.0
 - 修复关键问题：API重试成功后调用completion时pkcForceActive已过期，现在在每次调用completion前重新设置
 - 所有completion调用路径（成功/fallback/异常）都设置pkcForceActive=YES
 - 全面审查确认：不闪退、不影响正常消息/语音发送、不影响PKC其他功能

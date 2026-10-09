@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.0 最终版
+// PKC 60秒新闻修复插件 v3.1
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -16,6 +16,11 @@
 //   修复：只在方法不存在时用 class_addMethod 添加转发，不覆盖已有方法
 //
 // 所有操作包裹 @try/@catch 防止闪退
+
+// === 后台/锁屏发送支持 ===
+// PKC 检查 applicationState，后台时只设 flag 不发送
+// 我们 hook applicationState，在 send60s 执行期间返回 active，让 PKC 在后台也发送
+static BOOL pkcForceActive = NO;
 
 // === 多 API 源（按可靠性+更新速度排序） ===
 // 优先级说明：
@@ -876,10 +881,7 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
     } @catch (NSException *e) {}
 }
 
-// === 后台/锁屏发送支持 ===
-// PKC 检查 applicationState，后台时只设 flag 不发送
-// 我们 hook applicationState，在 send60s 执行期间返回 active，让 PKC 在后台也发送
-static BOOL pkcForceActive = NO;
+// === 后台/锁屏发送支持 hook ===
 
 %hook UIApplication
 - (UIApplicationState)applicationState {
