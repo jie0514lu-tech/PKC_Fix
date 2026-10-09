@@ -55,7 +55,12 @@ make package
 
 ## 版本历史
 
-### v1.4（当前版本）
+### v1.5（当前版本）
+- 修复新鲜度检查 bug：之前文本含昨天日期但找不到今天日期时默认通过，现在会检测昨天的日期并跳过
+- 同时检查 JSON 的 date/update/create_time 字段和文本中的日期（月日/ISO格式）
+- 如果 API 返回昨天的新闻 → 自动跳到下一个 API
+
+### v1.4
 - API 优先级重排：viki.moe text → viki.moe JSON → qqsuu → oioweb → auth.top → 03c3 → lbbb
 - 新增日期新鲜度检查：检查 JSON date/update 字段和文本中的日期，防止发送昨天的重复新闻
 - 新增失败追踪：API 连续失败 3 次后自动跳过 30 分钟，避免反复尝试不可用的 API

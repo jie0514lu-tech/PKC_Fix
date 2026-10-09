@@ -150,26 +150,37 @@ static BOOL PKC60sIsNewsFresh(NSString *newsText, NSDictionary *json) {
             }
         }
 
-        // 方式2：检查文本中是否包含今天的日期
+        // 方式2：检查文本中的日期
         if (newsText.length > 0) {
-            // 检查 "10月9日" 或 "10月09日" 格式
-            NSString *dateStr1 = [NSString stringWithFormat:@"%ld月%ld日", (long)todayMonth, (long)todayDay];
-            NSString *dateStr2 = [NSString stringWithFormat:@"%ld月%02ld日", (long)todayMonth, (long)todayDay];
-            if ([newsText containsString:dateStr1] || [newsText containsString:dateStr2]) {
+            // 今天的日期格式
+            NSString *todayMD1 = [NSString stringWithFormat:@"%ld月%ld日", (long)todayMonth, (long)todayDay];
+            NSString *todayMD2 = [NSString stringWithFormat:@"%ld月%02ld日", (long)todayMonth, (long)todayDay];
+            NSString *todayISO1 = [NSString stringWithFormat:@"%ld-%ld-%ld", (long)todayYear, (long)todayMonth, (long)todayDay];
+            NSString *todayISO2 = [NSString stringWithFormat:@"%ld/%ld/%ld", (long)todayYear, (long)todayMonth, (long)todayDay];
+
+            // 如果包含今天的日期 → 新鲜
+            if ([newsText containsString:todayMD1] || [newsText containsString:todayMD2] ||
+                [newsText containsString:todayISO1] || [newsText containsString:todayISO2]) {
                 return YES;
             }
-            // 检查 "2026-10-09" 或 "2026/10/09" 格式
-            NSString *isoDate1 = [NSString stringWithFormat:@"%ld-%ld-%ld", (long)todayYear, (long)todayMonth, (long)todayDay];
-            NSString *isoDate2 = [NSString stringWithFormat:@"%ld/%ld/%ld", (long)todayYear, (long)todayMonth, (long)todayDay];
-            if ([newsText containsString:isoDate1] || [newsText containsString:isoDate2]) {
-                return YES;
+
+            // 检查是否包含昨天的日期 → 旧闻
+            NSDate *yesterday = [cal dateByAddingUnit:NSCalendarUnitDay value:-1 toDate:now options:0];
+            NSDateComponents *yComps = [cal components:(NSCalendarUnitYear | NSCalendarUnitMonth | NSCalendarUnitDay) fromDate:yesterday];
+            NSString *yestMD1 = [NSString stringWithFormat:@"%ld月%ld日", (long)[yComps month], (long)[yComps day]];
+            NSString *yestMD2 = [NSString stringWithFormat:@"%ld月%02ld日", (long)[yComps month], (long)[yComps day]];
+            NSString *yestISO1 = [NSString stringWithFormat:@"%ld-%ld-%ld", (long)[yComps year], (long)[yComps month], (long)[yComps day]];
+            NSString *yestISO2 = [NSString stringWithFormat:@"%ld/%ld/%ld", (long)[yComps year], (long)[yComps month], (long)[yComps day]];
+
+            if ([newsText containsString:yestMD1] || [newsText containsString:yestMD2] ||
+                [newsText containsString:yestISO1] || [newsText containsString:yestISO2]) {
+                NSLog(@"[PKC60sFix] Stale text: found yesterday's date but not today's");
+                return NO; // 旧闻，跳过
             }
-            // 如果文本里没有明确的日期，无法判断新鲜度，默认通过（总比没有好）
+
+            // 文本中没有任何日期信息，无法判断，默认通过
             return YES;
         }
-    } @catch (NSException *e) {}
-    return YES;
-}
 
 #pragma mark - 日期/星期/农历格式化
 
