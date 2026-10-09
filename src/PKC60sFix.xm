@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v1.8
+// PKC 60秒新闻修复插件 v1.9
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -450,8 +450,15 @@ static NSString *PKC60sFormatDateHeader(void) {
                     return;
                 }
 
-                // 保存当前内容哈希供下次比对
-                PKC60sSaveNewsHash(newsText);
+                // 延迟5分钟保存哈希，给 PKC 重试发送的时间
+                // 如果 PKC 在5分钟内再次获取新闻（发送失败重试），哈希还没保存，相同内容不会被跳过
+                // 5分钟后保存，防止同一天重复发送
+                NSString *newsToSave = [newsText copy];
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * 60 * NSEC_PER_SEC)),
+                               dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+                    PKC60sSaveNewsHash(newsToSave);
+                    NSLog(@"[PKC60sFix] News hash saved after 5min delay (send assumed successful)");
+                });
 
                 NSLog(@"[PKC60sFix] Success from %@", urlString);
                 completion(newsText);
