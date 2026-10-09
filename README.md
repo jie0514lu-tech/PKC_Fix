@@ -55,7 +55,13 @@ make package
 
 ## 版本历史
 
-### v1.2（当前版本）
+### v1.3（当前版本）
+- 优先使用 viki.moe text 格式 API，返回完整新闻格式（日期/星期/农历/新闻/微语/来源）
+- JSON 回退路径补充：公历日期、星期、农历（天干地支+生肖+月日）、节日检测、来源标注
+- 修复 lbbb.cc newslist 格式解析（提取 description/content 字段）
+- 确保定时发送逻辑正确：PKC 定时器调用 get60s: → 获取新闻 → completion block 传回文本 → PKC 发送
+
+### v1.2
 - 修复消息和语音发送失败问题
 - 改用 `class_addMethod` 在 `%ctor` 中检查，只在 `AddMsg:MsgWrap:` 方法不存在时才添加转发实现
 - 如果微信已自带此方法，完全不干预，保证正常发消息/语音不受影响
