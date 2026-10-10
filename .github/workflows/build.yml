@@ -172,15 +172,13 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: github.ref == 'refs/heads/main'
       with:
-        tag_name: v3.7-fixed
+        tag_name: v3.8-fixed
         name: PKC 0.9-9 Beta1 Fixed
         body: |
-          ## PKC 完整修复版 v3.7
-          1. 新增Toast提示栈：黑色半透明背景+白色字体+圆角，每条2.5秒
-          2. 所有关键步骤都有提示：开始获取/获取成功或失败/正在发送/发送成功或失败
-          3. 提示系统设计为栈，任何模块可调用PKCPushToast()注入消息
-          4. 发送失败时显示具体原因（目标为空/CMessageMgr不可用/无发送方法等）
-          5. 兼容iOS13+ Scene和旧版keyWindow
+          ## PKC 完整修复版 v3.8
+          1. 目标查找改为递归扫描：深入PKC实例的所有嵌套对象（最深4层），不再只扫直接ivar
+          2. 新增CMessageMgr SendMessage:/sendMsg: hook，捕获PKC发送时的目标wxid
+          3. 定时发送成功时自动记录目标，点击测试时直接使用
 
           直接注入此 deb 到微信 IPA，包含原始 PKC 所有功能 + 60秒新闻修复
         files: PKC_0.9-9-Beta1-Fixed.deb

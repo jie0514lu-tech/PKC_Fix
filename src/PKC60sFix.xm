@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.7
+// PKC 60秒新闻修复插件 v3.8
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -1074,45 +1074,69 @@ static id pkcGetCMessageMgr(void) {
 }
 
 // 从对象中查找目标 wxid（群聊 @chatroom 或好友 wxid_）
+// 递归扫描对象的所有嵌套对象，查找 wxid
+static void pkcScanObjectRecursive(id obj, NSInteger depth, NSMutableSet *visited);
+
 static void pkcFindTargetInObject(id obj) {
     if (!obj) return;
     @try {
-        // 扫描当前类和父类的所有 ivar
+        NSMutableSet *visited = [NSMutableSet set];
+        pkcScanObjectRecursive(obj, 0, visited);
+    } @catch (NSException *e) {}
+}
+
+static void pkcScanObjectRecursive(id obj, NSInteger depth, NSMutableSet *visited) {
+    if (!obj || depth > 4) return;
+    if (pkcTargetWxid.length > 0) return; // 已找到
+    @try {
+        // 防止循环引用
+        if ([visited containsObject:obj]) return;
+        [visited addObject:obj];
+
+        // 如果是字符串，检查是否是 wxid
+        if ([obj isKindOfClass:[NSString class]]) {
+            NSString *str = (NSString *)obj;
+            if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
+                NSLog(@"[PKC60sFix] Found target (depth=%ld): %@", (long)depth, str);
+                pkcTargetWxid = [str copy];
+                return;
+            }
+            return;
+        }
+
+        // 如果是数组，遍历每个元素
+        if ([obj isKindOfClass:[NSArray class]]) {
+            for (id item in (NSArray *)obj) {
+                pkcScanObjectRecursive(item, depth + 1, visited);
+                if (pkcTargetWxid.length > 0) return;
+            }
+            return;
+        }
+
+        // 如果是字典，遍历所有值
+        if ([obj isKindOfClass:[NSDictionary class]]) {
+            for (id val in [(NSDictionary *)obj allValues]) {
+                pkcScanObjectRecursive(val, depth + 1, visited);
+                if (pkcTargetWxid.length > 0) return;
+            }
+            return;
+        }
+
+        // 扫描对象的 ivar（包括父类）
         Class cls = [obj class];
         while (cls && cls != [NSObject class]) {
             unsigned int count = 0;
             Ivar *ivars = class_copyIvarList(cls, &count);
             for (unsigned int i = 0; i < count; i++) {
-                const char *name = ivar_getName(ivars[i]);
-                if (!name) continue;
                 const char *type = ivar_getTypeEncoding(ivars[i]);
                 if (!type || !strstr(type, "@")) continue;
 
                 id val = object_getIvar(obj, ivars[i]);
-                if (!val) continue;
-
-                // 直接是 NSString
-                if ([val isKindOfClass:[NSString class]]) {
-                    NSString *str = (NSString *)val;
-                    if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
-                        NSLog(@"[PKC60sFix] Found target in ivar '%s': %@", name, str);
-                        pkcTargetWxid = [str copy];
+                if (val) {
+                    pkcScanObjectRecursive(val, depth + 1, visited);
+                    if (pkcTargetWxid.length > 0) {
                         if (ivars) free(ivars);
                         return;
-                    }
-                }
-                // 是数组，遍历找 wxid
-                else if ([val isKindOfClass:[NSArray class]]) {
-                    for (id item in (NSArray *)val) {
-                        if ([item isKindOfClass:[NSString class]]) {
-                            NSString *str = (NSString *)item;
-                            if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
-                                NSLog(@"[PKC60sFix] Found target in array ivar '%s': %@", name, str);
-                                pkcTargetWxid = [str copy];
-                                if (ivars) free(ivars);
-                                return;
-                            }
-                        }
                     }
                 }
             }
@@ -1432,7 +1456,7 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
 %end
 
 // === CMessageMgr 诊断 hook（仅日志，不修改行为） ===
-// 用于确认 PKC 是否真的调用了 CMessageMgr 的发送方法
+// 用于确认 PKC 是否真的调用了 CMessageMgr 的发送方法，并捕获目标 wxid
 %hook CMessageMgr
 - (void)AddMsg:(id)arg1 MsgWrap:(id)arg2 {
     @try {
@@ -1440,10 +1464,25 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
         NSString *content = [arg2 valueForKey:@"m_nsContent"];
         NSLog(@"[PKC60sFix] CMessageMgr AddMsg:MsgWrap: called, to=%@ contentLen=%lu",
               toUsr ?: @"nil", (unsigned long)(content ? content.length : 0));
-        // 提取目标
-        if (toUsr.length > 0) {
-            pkcTargetWxid = [toUsr copy];
-        }
+        if (toUsr.length > 0) pkcTargetWxid = [toUsr copy];
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+- (void)SendMessage:(id)arg1 {
+    @try {
+        NSString *toUsr = [arg1 valueForKey:@"m_nsToUsr"];
+        NSLog(@"[PKC60sFix] CMessageMgr SendMessage: called, to=%@", toUsr ?: @"nil");
+        if (toUsr.length > 0) pkcTargetWxid = [toUsr copy];
+    } @catch (NSException *e) {}
+    %orig;
+}
+
+- (void)sendMsg:(id)arg1 {
+    @try {
+        NSString *toUsr = [arg1 valueForKey:@"m_nsToUsr"];
+        NSLog(@"[PKC60sFix] CMessageMgr sendMsg: called, to=%@", toUsr ?: @"nil");
+        if (toUsr.length > 0) pkcTargetWxid = [toUsr copy];
     } @catch (NSException *e) {}
     %orig;
 }
