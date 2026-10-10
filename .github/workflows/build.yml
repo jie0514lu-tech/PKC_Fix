@@ -172,13 +172,14 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: github.ref == 'refs/heads/main'
       with:
-        tag_name: v3.8-fixed
+        tag_name: v3.9-fixed
         name: PKC 0.9-9 Beta1 Fixed
         body: |
-          ## PKC 完整修复版 v3.8
-          1. 目标查找改为递归扫描：深入PKC实例的所有嵌套对象（最深4层），不再只扫直接ivar
-          2. 新增CMessageMgr SendMessage:/sendMsg: hook，捕获PKC发送时的目标wxid
-          3. 定时发送成功时自动记录目标，点击测试时直接使用
+          ## PKC 完整修复版 v3.9
+          1. 目标wxid持久化到NSUserDefaults，APP重启后仍有目标
+          2. pkcFindTargetAll每次都重新扫描，目标改变时自动发现并更新
+          3. 统一pkcSetTarget函数：内存+持久化同时更新，所有赋值点统一调用
+          4. CMessageMgr hook捕获发送时的目标并自动持久化
 
           直接注入此 deb 到微信 IPA，包含原始 PKC 所有功能 + 60秒新闻修复
         files: PKC_0.9-9-Beta1-Fixed.deb

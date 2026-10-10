@@ -55,7 +55,13 @@ make package
 
 ## 版本历史
 
-### v3.8（当前版本）
+### v3.9（当前版本）
+- 目标wxid持久化到NSUserDefaults，APP重启后仍有目标
+- pkcFindTargetAll每次都重新扫描，目标改变时自动发现并更新
+- 统一pkcSetTarget函数：内存+持久化同时更新，所有赋值点统一调用
+- CMessageMgr hook捕获发送时的目标并自动持久化
+
+### v3.8
 - 目标查找改为递归扫描：深入PKC实例的所有嵌套对象（最深4层），包括嵌套的数组、字典、自定义对象
 - 新增CMessageMgr SendMessage:/sendMsg: hook，PKC定时发送成功时自动捕获并记录目标wxid
 - 点击测试时，如果之前定时发送成功过，直接使用已记录的目标发送

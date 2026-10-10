@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.8
+// PKC 60秒新闻修复插件 v3.9
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -32,6 +32,27 @@ static void pkcFindTargetFromDefaults(void);
 static void pkcFindTargetFromFiles(void);
 static void pkcFindTargetAll(void);
 static void pkcSendDirectly(NSString *newsText, NSString *target);
+
+// 统一设置目标：更新内存 + 持久化到 NSUserDefaults
+// 每次调用都会覆盖旧目标，确保目标改变时能自动更新
+static void pkcSetTarget(NSString *target) {
+    if (!target || target.length == 0) return;
+    pkcTargetWxid = [target copy];
+    @try {
+        [[NSUserDefaults standardUserDefaults] setObject:target forKey:@"pkc60s_target_wxid"];
+    } @catch (NSException *e) {}
+}
+
+// APP启动时从 NSUserDefaults 加载上次保存的目标
+static void pkcLoadTarget(void) {
+    @try {
+        NSString *saved = [[NSUserDefaults standardUserDefaults] stringForKey:@"pkc60s_target_wxid"];
+        if (saved.length > 0) {
+            pkcTargetWxid = [saved copy];
+            NSLog(@"[PKC60sFix] Loaded saved target: %@", pkcTargetWxid);
+        }
+    } @catch (NSException *e) {}
+}
 
 // === 多 API 源（按可靠性+更新速度排序） ===
 // 优先级说明：
@@ -1098,7 +1119,7 @@ static void pkcScanObjectRecursive(id obj, NSInteger depth, NSMutableSet *visite
             NSString *str = (NSString *)obj;
             if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
                 NSLog(@"[PKC60sFix] Found target (depth=%ld): %@", (long)depth, str);
-                pkcTargetWxid = [str copy];
+                pkcSetTarget(str);
                 return;
             }
             return;
@@ -1156,7 +1177,7 @@ static void pkcFindTargetFromDefaults(void) {
                 NSString *str = (NSString *)val;
                 if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
                     NSLog(@"[PKC60sFix] Found target in NSUserDefaults key '%@': %@", key, str);
-                    pkcTargetWxid = [str copy];
+                    pkcSetTarget(str);
                     return;
                 }
             } else if ([val isKindOfClass:[NSArray class]]) {
@@ -1165,7 +1186,7 @@ static void pkcFindTargetFromDefaults(void) {
                         NSString *str = (NSString *)item;
                         if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
                             NSLog(@"[PKC60sFix] Found target in NSUserDefaults array '%@': %@", key, str);
-                            pkcTargetWxid = [str copy];
+                            pkcSetTarget(str);
                             return;
                         }
                     }
@@ -1176,7 +1197,7 @@ static void pkcFindTargetFromDefaults(void) {
                         NSString *str = (NSString *)subVal;
                         if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
                             NSLog(@"[PKC60sFix] Found target in NSUserDefaults dict '%@': %@", key, str);
-                            pkcTargetWxid = [str copy];
+                            pkcSetTarget(str);
                             return;
                         }
                     }
@@ -1213,7 +1234,7 @@ static void pkcFindTargetFromFiles(void) {
                     NSString *str = (NSString *)val;
                     if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
                         NSLog(@"[PKC60sFix] Found target in plist '%@': %@", file, str);
-                        pkcTargetWxid = [str copy];
+                        pkcSetTarget(str);
                         return;
                     }
                 } else if ([val isKindOfClass:[NSArray class]]) {
@@ -1222,7 +1243,7 @@ static void pkcFindTargetFromFiles(void) {
                             NSString *str = (NSString *)item;
                             if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
                                 NSLog(@"[PKC60sFix] Found target in plist '%@' array: %@", file, str);
-                                pkcTargetWxid = [str copy];
+                                pkcSetTarget(str);
                                 return;
                             }
                         }
@@ -1236,11 +1257,12 @@ static void pkcFindTargetFromFiles(void) {
 }
 
 // 综合查找目标（所有方式）
+// 每次都重新扫描，确保目标改变时能发现并更新
 static void pkcFindTargetAll(void) {
     @try {
-        if (pkcTargetWxid.length > 0) return; // 已有目标
+        NSString *oldTarget = pkcTargetWxid;
 
-        // 1. 从 PKC 单例查找
+        // 1. 从 PKC 单例查找（递归扫描所有嵌套对象）
         Class pkcCls = NSClassFromString(@"PWZfnvktqn");
         if (pkcCls) {
             id inst = nil;
@@ -1251,26 +1273,24 @@ static void pkcFindTargetAll(void) {
             } @catch (NSException *e) {}
             if (inst) pkcFindTargetInObject(inst);
         }
-        if (pkcTargetWxid.length > 0) {
-            NSLog(@"[PKC60sFix] Target from PKC singleton: %@", pkcTargetWxid);
-            return;
-        }
 
         // 2. 从 NSUserDefaults 查找
-        pkcFindTargetFromDefaults();
-        if (pkcTargetWxid.length > 0) {
-            NSLog(@"[PKC60sFix] Target from NSUserDefaults: %@", pkcTargetWxid);
-            return;
+        if (pkcTargetWxid.length == 0 || [pkcTargetWxid isEqualToString:oldTarget]) {
+            pkcFindTargetFromDefaults();
         }
 
         // 3. 从 plist 文件查找
-        pkcFindTargetFromFiles();
-        if (pkcTargetWxid.length > 0) {
-            NSLog(@"[PKC60sFix] Target from plist files: %@", pkcTargetWxid);
-            return;
+        if (pkcTargetWxid.length == 0 || [pkcTargetWxid isEqualToString:oldTarget]) {
+            pkcFindTargetFromFiles();
         }
 
-        NSLog(@"[PKC60sFix] Target NOT found in any source");
+        if (pkcTargetWxid.length > 0) {
+            if (![pkcTargetWxid isEqualToString:oldTarget]) {
+                NSLog(@"[PKC60sFix] Target updated: %@", pkcTargetWxid);
+            }
+        } else {
+            NSLog(@"[PKC60sFix] Target NOT found in any source");
+        }
     } @catch (NSException *e) {
         NSLog(@"[PKC60sFix] Find target all exception: %@", e);
     }
@@ -1367,7 +1387,7 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
         @try {
             NSString *toUsr = [msgWrap valueForKey:@"m_nsToUsr"];
             if (toUsr && toUsr.length > 0) {
-                pkcTargetWxid = [toUsr copy];
+                pkcSetTarget(toUsr);
                 NSLog(@"[PKC60sFix] Extracted target from msgWrap: %@", pkcTargetWxid);
             }
         } @catch (NSException *e) {}
@@ -1464,7 +1484,7 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
         NSString *content = [arg2 valueForKey:@"m_nsContent"];
         NSLog(@"[PKC60sFix] CMessageMgr AddMsg:MsgWrap: called, to=%@ contentLen=%lu",
               toUsr ?: @"nil", (unsigned long)(content ? content.length : 0));
-        if (toUsr.length > 0) pkcTargetWxid = [toUsr copy];
+        if (toUsr.length > 0) pkcSetTarget(toUsr);
     } @catch (NSException *e) {}
     %orig;
 }
@@ -1473,7 +1493,7 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
     @try {
         NSString *toUsr = [arg1 valueForKey:@"m_nsToUsr"];
         NSLog(@"[PKC60sFix] CMessageMgr SendMessage: called, to=%@", toUsr ?: @"nil");
-        if (toUsr.length > 0) pkcTargetWxid = [toUsr copy];
+        if (toUsr.length > 0) pkcSetTarget(toUsr);
     } @catch (NSException *e) {}
     %orig;
 }
@@ -1482,7 +1502,7 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
     @try {
         NSString *toUsr = [arg1 valueForKey:@"m_nsToUsr"];
         NSLog(@"[PKC60sFix] CMessageMgr sendMsg: called, to=%@", toUsr ?: @"nil");
-        if (toUsr.length > 0) pkcTargetWxid = [toUsr copy];
+        if (toUsr.length > 0) pkcSetTarget(toUsr);
     } @catch (NSException *e) {}
     %orig;
 }
@@ -1574,6 +1594,9 @@ static void pkcStartKeepAliveTimer(void) {
 
         // 5. 启动25秒保活定时器
         pkcStartKeepAliveTimer();
+
+        // 6. 加载上次保存的目标wxid（APP重启后仍有目标）
+        pkcLoadTarget();
 
         // 6. 延迟15秒后扫描PKC实例，提取目标wxid（等PKC初始化完成）
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(15 * NSEC_PER_SEC)),
