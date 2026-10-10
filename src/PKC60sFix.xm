@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.9
+// PKC 60秒新闻修复插件 v4.0
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -1256,6 +1256,64 @@ static void pkcFindTargetFromFiles(void) {
     }
 }
 
+// 从当前聊天界面获取目标 wxid
+// 遍历 UIViewController 栈，找聊天控制器的 m_nsChatName / m_contact / session 等属性
+static void pkcFindTargetFromCurrentVC(void) {
+    @try {
+        UIViewController *topVC = nil;
+
+        // 获取最顶层的 ViewController
+        UIWindow *window = [[UIApplication sharedApplication] keyWindow];
+        if (!window) {
+            NSArray *windows = [[UIApplication sharedApplication] windows];
+            for (UIWindow *w in windows) {
+                if (w.isKeyWindow) { window = w; break; }
+            }
+        }
+        if (!window) return;
+
+        topVC = window.rootViewController;
+        while (topVC.presentedViewController) {
+            topVC = topVC.presentedViewController;
+        }
+
+        // 如果是 navigation controller，取 topViewController
+        if ([topVC isKindOfClass:[UINavigationController class]]) {
+            topVC = [(UINavigationController *)topVC topViewController];
+        }
+
+        if (!topVC) return;
+
+        NSLog(@"[PKC60sFix] Current VC: %@", NSStringFromClass([topVC class]));
+
+        // 递归扫描当前 VC 的 ivar，找 wxid
+        pkcScanObjectRecursive(topVC, 0, [NSMutableSet set]);
+        if (pkcTargetWxid.length > 0) {
+            NSLog(@"[PKC60sFix] Found target from current VC: %@", pkcTargetWxid);
+            return;
+        }
+
+        // 尝试常见的聊天控制器属性
+        NSArray *chatProps = @[@"m_nsChatName", @"m_contact", @"m_nsToUsr",
+                              @"chatName", @"toUser", @"session", @"m_session"];
+        for (NSString *prop in chatProps) {
+            @try {
+                id val = [topVC valueForKey:prop];
+                if ([val isKindOfClass:[NSString class]]) {
+                    NSString *str = (NSString *)val;
+                    if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
+                        NSLog(@"[PKC60sFix] Found target from VC prop '%@': %@", prop, str);
+                        pkcSetTarget(str);
+                        return;
+                    }
+                }
+            } @catch (NSException *e) {}
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[PKC60sFix] Current VC scan exception: %@", e);
+    }
+}
+
 // 综合查找目标（所有方式）
 // 每次都重新扫描，确保目标改变时能发现并更新
 static void pkcFindTargetAll(void) {
@@ -1282,6 +1340,11 @@ static void pkcFindTargetAll(void) {
         // 3. 从 plist 文件查找
         if (pkcTargetWxid.length == 0 || [pkcTargetWxid isEqualToString:oldTarget]) {
             pkcFindTargetFromFiles();
+        }
+
+        // 4. 从当前聊天界面查找（如果用户在聊天页点击测试）
+        if (pkcTargetWxid.length == 0 || [pkcTargetWxid isEqualToString:oldTarget]) {
+            pkcFindTargetFromCurrentVC();
         }
 
         if (pkcTargetWxid.length > 0) {

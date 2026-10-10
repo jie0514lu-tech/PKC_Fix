@@ -55,7 +55,13 @@ make package
 
 ## 版本历史
 
-### v3.9（当前版本）
+### v4.0（当前版本）
+- 新增第4种目标查找方式：从当前聊天界面获取wxid
+- 如果用户在聊天页点击测试，直接用当前聊天对象作为目标
+- 遍历UIViewController栈，递归扫描ivar+尝试常见聊天属性(m_nsChatName/m_contact/session等)
+- 结合v3.9的持久化+自动更新，目标获取能力大幅提升
+
+### v3.9
 - 目标wxid持久化到NSUserDefaults，APP重启后仍有目标
 - pkcFindTargetAll每次都重新扫描，目标改变时自动发现并更新
 - 统一pkcSetTarget函数：内存+持久化同时更新，所有赋值点统一调用

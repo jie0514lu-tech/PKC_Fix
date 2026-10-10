@@ -172,14 +172,14 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: github.ref == 'refs/heads/main'
       with:
-        tag_name: v3.9-fixed
+        tag_name: v4.0-fixed
         name: PKC 0.9-9 Beta1 Fixed
         body: |
-          ## PKC 完整修复版 v3.9
-          1. 目标wxid持久化到NSUserDefaults，APP重启后仍有目标
-          2. pkcFindTargetAll每次都重新扫描，目标改变时自动发现并更新
-          3. 统一pkcSetTarget函数：内存+持久化同时更新，所有赋值点统一调用
-          4. CMessageMgr hook捕获发送时的目标并自动持久化
+          ## PKC 完整修复版 v4.0
+          1. 新增第4种目标查找方式：从当前聊天界面获取wxid
+          2. 如果用户在聊天页点击测试，直接用当前聊天对象作为目标
+          3. 遍历UIViewController栈，递归扫描ivar+尝试常见聊天属性(m_nsChatName/m_contact/session等)
+          4. 结合v3.9的持久化+自动更新，目标获取能力大幅提升
 
           直接注入此 deb 到微信 IPA，包含原始 PKC 所有功能 + 60秒新闻修复
         files: PKC_0.9-9-Beta1-Fixed.deb
