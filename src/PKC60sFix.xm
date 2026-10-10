@@ -29,6 +29,7 @@ static NSString *pkcTargetWxid = nil;
 static id pkcGetCMessageMgr(void);
 static void pkcFindTargetInObject(id obj);
 static void pkcFindTargetFromCurrentVC(void);
+static void pkcFindTargetAll(void);
 static void pkcSendDirectly(NSString *newsText, NSString *target);
 
 // 统一设置目标：更新内存 + 持久化到 NSUserDefaults
@@ -1570,11 +1571,11 @@ static void pkcStartKeepAliveTimer(void) {
         // 3. 检查 CMessageWrap 是否可用
         Class wrapClass = NSClassFromString(@"CMessageWrap");
         if (!wrapClass) wrapClass = NSClassFromString(@"MessageWrap");
-        NSLog(@"[PKC60sFix] MessageWrap class: %@", wrapClass ?: @"NOT FOUND");
+        NSLog(@"[PKC60sFix] MessageWrap class: %@", wrapClass ? NSStringFromClass(wrapClass) : @"NOT FOUND");
 
         // 4. 检查 PKC 主类
         Class pkcClass = NSClassFromString(@"PWZfnvktqn");
-        NSLog(@"[PKC60sFix] PKC main class: %@", pkcClass ?: @"NOT FOUND");
+        NSLog(@"[PKC60sFix] PKC main class: %@", pkcClass ? NSStringFromClass(pkcClass) : @"NOT FOUND");
 
         // 5. 启动25秒保活定时器
         pkcStartKeepAliveTimer();
