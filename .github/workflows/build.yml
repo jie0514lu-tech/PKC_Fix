@@ -172,15 +172,15 @@ jobs:
       uses: softprops/action-gh-release@v1
       if: github.ref == 'refs/heads/main'
       with:
-        tag_name: v3.5-fixed
+        tag_name: v3.6-fixed
         name: PKC 0.9-9 Beta1 Fixed
         body: |
-          ## PKC 完整修复版 v3.5
-          1. 修复text格式API返回JSON时直接发送原始JSON的问题
-          2. parseNewsData优先解析JSON，只有非JSON才按文本处理
-          3. 增加JSON字符串过滤，防止把{...}当新闻发送
-          4. parseJSON增加day_of_week和lunar_date字段支持
-          5. 新鲜度检查：只要有JSON就检查，不管text/JSON API
+          ## PKC 完整修复版 v3.6
+          1. 新增NSUserDefaults全盘扫描目标wxid
+          2. 新增PKC plist文件扫描目标wxid
+          3. pkcFindTargetInObject增强：扫描父类ivar+数组类型
+          4. get60s备份发送前调用pkcFindTargetAll()全面查找目标
+          5. 新增CMessageMgr AddMsg:MsgWrap:诊断hook（仅日志+调用原始）
 
           直接注入此 deb 到微信 IPA，包含原始 PKC 所有功能 + 60秒新闻修复
         files: PKC_0.9-9-Beta1-Fixed.deb

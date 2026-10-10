@@ -55,7 +55,14 @@ make package
 
 ## 版本历史
 
-### v3.5（当前版本）
+### v3.6（当前版本）
+- 新增NSUserDefaults全盘扫描目标wxid（PKC的目标很可能存在这里）
+- 新增PKC plist文件扫描目标wxid
+- pkcFindTargetInObject增强：扫描父类ivar+数组类型
+- get60s备份发送前调用pkcFindTargetAll()从PKC单例/NSUserDefaults/plist全面查找目标
+- 新增CMessageMgr AddMsg:MsgWrap:诊断hook（仅日志+调用原始），用于确认PKC是否真的调用了发送方法
+
+### v3.5
 - 修复：text格式API（viki.moe?format=text）实际返回JSON时，原代码把JSON当文本直接发送
 - parseNewsData改为优先尝试JSON解析，只有非JSON才按纯文本处理
 - 增加JSON字符串过滤：以{或[开头的文本直接拒绝，防止发送原始JSON

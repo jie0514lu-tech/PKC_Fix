@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.5
+// PKC 60秒新闻修复插件 v3.6
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -28,6 +28,9 @@ static NSString *pkcTargetWxid = nil;
 // 前向声明
 static id pkcGetCMessageMgr(void);
 static void pkcFindTargetInObject(id obj);
+static void pkcFindTargetFromDefaults(void);
+static void pkcFindTargetFromFiles(void);
+static void pkcFindTargetAll(void);
 static void pkcSendDirectly(NSString *newsText, NSString *target);
 
 // === 多 API 源（按可靠性+更新速度排序） ===
@@ -802,9 +805,14 @@ static dispatch_source_t pkcRetryTimer = nil;
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(2 * NSEC_PER_SEC)),
                                dispatch_get_global_queue(0, 0), ^{
                     @try {
+                        // 发送前再全面查找一次目标（PKC 单例 / NSUserDefaults / plist 文件）
+                        pkcFindTargetAll();
+                        NSLog(@"[PKC60sFix] Backup send check: target=%@", pkcTargetWxid ?: @"nil");
                         if (pkcTargetWxid && pkcTargetWxid.length > 0) {
                             NSLog(@"[PKC60sFix] Backup direct send to %@", pkcTargetWxid);
                             pkcSendDirectly(newsText, pkcTargetWxid);
+                        } else {
+                            NSLog(@"[PKC60sFix] Backup send aborted: no target found");
                         }
                     } @catch (NSException *e) {
                         NSLog(@"[PKC60sFix] Backup send exception: %@", e);
@@ -924,29 +932,179 @@ static id pkcGetCMessageMgr(void) {
 static void pkcFindTargetInObject(id obj) {
     if (!obj) return;
     @try {
-        unsigned int count = 0;
-        Ivar *ivars = class_copyIvarList([obj class], &count);
-        for (unsigned int i = 0; i < count; i++) {
-            const char *name = ivar_getName(ivars[i]);
-            if (!name) continue;
-            const char *type = ivar_getTypeEncoding(ivars[i]);
-            if (!type || !strstr(type, "@")) continue;
+        // 扫描当前类和父类的所有 ivar
+        Class cls = [obj class];
+        while (cls && cls != [NSObject class]) {
+            unsigned int count = 0;
+            Ivar *ivars = class_copyIvarList(cls, &count);
+            for (unsigned int i = 0; i < count; i++) {
+                const char *name = ivar_getName(ivars[i]);
+                if (!name) continue;
+                const char *type = ivar_getTypeEncoding(ivars[i]);
+                if (!type || !strstr(type, "@")) continue;
 
-            id val = object_getIvar(obj, ivars[i]);
-            if (![val isKindOfClass:[NSString class]]) continue;
-            NSString *str = (NSString *)val;
-            if (str.length == 0) continue;
+                id val = object_getIvar(obj, ivars[i]);
+                if (!val) continue;
 
-            // 群聊或好友 wxid
-            if ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"] ||
-                ([str length] >= 6 && [str length] <= 30 && ![str containsString:@" "])) {
-                NSLog(@"[PKC60sFix] Found target in ivar '%s': %@", name, str);
-                pkcTargetWxid = [str copy];
-                break;
+                // 直接是 NSString
+                if ([val isKindOfClass:[NSString class]]) {
+                    NSString *str = (NSString *)val;
+                    if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
+                        NSLog(@"[PKC60sFix] Found target in ivar '%s': %@", name, str);
+                        pkcTargetWxid = [str copy];
+                        if (ivars) free(ivars);
+                        return;
+                    }
+                }
+                // 是数组，遍历找 wxid
+                else if ([val isKindOfClass:[NSArray class]]) {
+                    for (id item in (NSArray *)val) {
+                        if ([item isKindOfClass:[NSString class]]) {
+                            NSString *str = (NSString *)item;
+                            if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
+                                NSLog(@"[PKC60sFix] Found target in array ivar '%s': %@", name, str);
+                                pkcTargetWxid = [str copy];
+                                if (ivars) free(ivars);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            if (ivars) free(ivars);
+            cls = class_getSuperclass(cls);
+        }
+    } @catch (NSException *e) {}
+}
+
+// 从 NSUserDefaults 中搜索目标 wxid
+static void pkcFindTargetFromDefaults(void) {
+    @try {
+        NSDictionary *allDefaults = [[NSUserDefaults standardUserDefaults] dictionaryRepresentation];
+        for (NSString *key in allDefaults) {
+            id val = allDefaults[key];
+            if ([val isKindOfClass:[NSString class]]) {
+                NSString *str = (NSString *)val;
+                if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
+                    NSLog(@"[PKC60sFix] Found target in NSUserDefaults key '%@': %@", key, str);
+                    pkcTargetWxid = [str copy];
+                    return;
+                }
+            } else if ([val isKindOfClass:[NSArray class]]) {
+                for (id item in (NSArray *)val) {
+                    if ([item isKindOfClass:[NSString class]]) {
+                        NSString *str = (NSString *)item;
+                        if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
+                            NSLog(@"[PKC60sFix] Found target in NSUserDefaults array '%@': %@", key, str);
+                            pkcTargetWxid = [str copy];
+                            return;
+                        }
+                    }
+                }
+            } else if ([val isKindOfClass:[NSDictionary class]]) {
+                for (id subVal in ((NSDictionary *)val).allValues) {
+                    if ([subVal isKindOfClass:[NSString class]]) {
+                        NSString *str = (NSString *)subVal;
+                        if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
+                            NSLog(@"[PKC60sFix] Found target in NSUserDefaults dict '%@': %@", key, str);
+                            pkcTargetWxid = [str copy];
+                            return;
+                        }
+                    }
+                }
             }
         }
-        if (ivars) free(ivars);
-    } @catch (NSException *e) {}
+    } @catch (NSException *e) {
+        NSLog(@"[PKC60sFix] Defaults scan exception: %@", e);
+    }
+}
+
+// 从 PKC plist 文件中搜索目标 wxid
+static void pkcFindTargetFromFiles(void) {
+    @try {
+        NSArray *paths = NSSearchPathForDirectoriesInDomains(NSLibraryDirectory, NSUserDomainMask, YES);
+        if (paths.count == 0) return;
+        NSString *libPath = paths[0];
+        NSString *prefsPath = [libPath stringByAppendingPathComponent:@"Preferences"];
+
+        NSFileManager *fm = [NSFileManager defaultManager];
+        NSArray *files = [fm contentsOfDirectoryAtPath:prefsPath error:nil];
+        for (NSString *file in files) {
+            if (![file.pathExtension isEqualToString:@"plist"]) continue;
+            // 只看可能和 PKC 相关的 plist
+            NSString *lower = [file lowercaseString];
+            if (![lower containsString:@"pkc"] && ![lower containsString:@"60s"] && ![lower containsString:@"news"]) continue;
+
+            NSString *filePath = [prefsPath stringByAppendingPathComponent:file];
+            NSDictionary *dict = [NSDictionary dictionaryWithContentsOfFile:filePath];
+            if (!dict) continue;
+
+            for (id val in dict.allValues) {
+                if ([val isKindOfClass:[NSString class]]) {
+                    NSString *str = (NSString *)val;
+                    if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
+                        NSLog(@"[PKC60sFix] Found target in plist '%@': %@", file, str);
+                        pkcTargetWxid = [str copy];
+                        return;
+                    }
+                } else if ([val isKindOfClass:[NSArray class]]) {
+                    for (id item in (NSArray *)val) {
+                        if ([item isKindOfClass:[NSString class]]) {
+                            NSString *str = (NSString *)item;
+                            if (str.length > 0 && ([str containsString:@"@chatroom"] || [str hasPrefix:@"wxid_"])) {
+                                NSLog(@"[PKC60sFix] Found target in plist '%@' array: %@", file, str);
+                                pkcTargetWxid = [str copy];
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } @catch (NSException *e) {
+        NSLog(@"[PKC60sFix] File scan exception: %@", e);
+    }
+}
+
+// 综合查找目标（所有方式）
+static void pkcFindTargetAll(void) {
+    @try {
+        if (pkcTargetWxid.length > 0) return; // 已有目标
+
+        // 1. 从 PKC 单例查找
+        Class pkcCls = NSClassFromString(@"PWZfnvktqn");
+        if (pkcCls) {
+            id inst = nil;
+            @try {
+                if ([pkcCls respondsToSelector:@selector(sharedInstance)]) {
+                    inst = [pkcCls performSelector:@selector(sharedInstance)];
+                }
+            } @catch (NSException *e) {}
+            if (inst) pkcFindTargetInObject(inst);
+        }
+        if (pkcTargetWxid.length > 0) {
+            NSLog(@"[PKC60sFix] Target from PKC singleton: %@", pkcTargetWxid);
+            return;
+        }
+
+        // 2. 从 NSUserDefaults 查找
+        pkcFindTargetFromDefaults();
+        if (pkcTargetWxid.length > 0) {
+            NSLog(@"[PKC60sFix] Target from NSUserDefaults: %@", pkcTargetWxid);
+            return;
+        }
+
+        // 3. 从 plist 文件查找
+        pkcFindTargetFromFiles();
+        if (pkcTargetWxid.length > 0) {
+            NSLog(@"[PKC60sFix] Target from plist files: %@", pkcTargetWxid);
+            return;
+        }
+
+        NSLog(@"[PKC60sFix] Target NOT found in any source");
+    } @catch (NSException *e) {
+        NSLog(@"[PKC60sFix] Find target all exception: %@", e);
+    }
 }
 
 // 直接创建消息并发送到目标
@@ -1115,6 +1273,24 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
                    dispatch_get_main_queue(), ^{
         pkcForceActive = NO;
     });
+}
+%end
+
+// === CMessageMgr 诊断 hook（仅日志，不修改行为） ===
+// 用于确认 PKC 是否真的调用了 CMessageMgr 的发送方法
+%hook CMessageMgr
+- (void)AddMsg:(id)arg1 MsgWrap:(id)arg2 {
+    @try {
+        NSString *toUsr = [arg2 valueForKey:@"m_nsToUsr"];
+        NSString *content = [arg2 valueForKey:@"m_nsContent"];
+        NSLog(@"[PKC60sFix] CMessageMgr AddMsg:MsgWrap: called, to=%@ contentLen=%lu",
+              toUsr ?: @"nil", (unsigned long)(content ? content.length : 0));
+        // 提取目标
+        if (toUsr.length > 0) {
+            pkcTargetWxid = [toUsr copy];
+        }
+    } @catch (NSException *e) {}
+    %orig;
 }
 %end
 
