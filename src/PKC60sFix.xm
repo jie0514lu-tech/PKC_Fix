@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.6
+// PKC 60秒新闻修复插件 v3.7
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -362,6 +362,144 @@ static NSString *PKC60sFormatDateHeader(void) {
     }
 }
 
+#pragma mark - Toast 提示栈
+// 黑色半透明背景 + 白色字体 + 圆角
+// 消息依次显示，每条2.5秒
+// 任何模块调用 [[PKCToastManager shared] pushMessage:@"xxx"] 即可注入提示
+
+@interface PKCToastManager : NSObject
++ (instancetype)shared;
+- (void)pushMessage:(NSString *)msg;
+@end
+
+@implementation PKCToastManager {
+    NSMutableArray *_messageStack;
+    BOOL _isShowing;
+}
+
++ (instancetype)shared {
+    static PKCToastManager *inst = nil;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ inst = [[PKCToastManager alloc] init]; });
+    return inst;
+}
+
+- (instancetype)init {
+    if (self = [super init]) {
+        _messageStack = [[NSMutableArray alloc] init];
+        _isShowing = NO;
+    }
+    return self;
+}
+
+- (void)pushMessage:(NSString *)msg {
+    if (!msg || msg.length == 0) return;
+    @synchronized(_messageStack) {
+        [_messageStack addObject:msg];
+    }
+    NSLog(@"[PKC60sFix][Toast] %@", msg);
+    [self showNext];
+}
+
+- (void)showNext {
+    if (_isShowing) return;
+
+    NSString *msg = nil;
+    @synchronized(_messageStack) {
+        if (_messageStack.count > 0) {
+            msg = [_messageStack firstObject];
+            [_messageStack removeObjectAtIndex:0];
+        }
+    }
+
+    if (!msg) return;
+
+    _isShowing = YES;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [self showToast:msg];
+    });
+}
+
+- (void)showToast:(NSString *)msg {
+    @try {
+        UIWindow *window = nil;
+        if (@available(iOS 13.0, *)) {
+            for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+                if (scene.activationState == UISceneActivationStateForegroundActive &&
+                    [scene isKindOfClass:[UIWindowScene class]]) {
+                    UIWindowScene *ws = (UIWindowScene *)scene;
+                    for (UIWindow *w in ws.windows) {
+                        if (w.isKeyWindow) { window = w; break; }
+                    }
+                    if (!window && ws.windows.count > 0) window = ws.windows.firstObject;
+                    break;
+                }
+            }
+        }
+        if (!window) {
+            window = [[UIApplication sharedApplication] keyWindow];
+        }
+        if (!window) {
+            NSArray *windows = [[UIApplication sharedApplication] windows];
+            if (windows.count > 0) window = windows.lastObject;
+        }
+        if (!window) {
+            _isShowing = NO;
+            [self showNext];
+            return;
+        }
+
+        UIView *toast = [[UIView alloc] init];
+        toast.backgroundColor = [[UIColor blackColor] colorWithAlphaComponent:0.78];
+        toast.layer.cornerRadius = 12;
+        toast.clipsToBounds = YES;
+
+        UILabel *label = [[UILabel alloc] init];
+        label.text = msg;
+        label.textColor = [UIColor whiteColor];
+        label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+        label.numberOfLines = 0;
+        label.textAlignment = NSTextAlignmentCenter;
+        [toast addSubview:label];
+
+        CGFloat maxWidth = window.bounds.size.width - 80;
+        CGRect textRect = [msg boundingRectWithSize:CGSizeMake(maxWidth - 40, CGFLOAT_MAX)
+                                            options:NSStringDrawingUsesLineFragmentOrigin
+                                         attributes:@{NSFontAttributeName: label.font}
+                                            context:nil];
+        CGFloat width = MIN(ceil(textRect.size.width) + 40, maxWidth);
+        CGFloat height = ceil(textRect.size.height) + 24;
+        toast.frame = CGRectMake((window.bounds.size.width - width) / 2,
+                                 (window.bounds.size.height - height) / 2,
+                                 width, height);
+        label.frame = CGRectMake(20, 12, width - 40, height - 24);
+
+        toast.alpha = 0;
+        [window addSubview:toast];
+
+        [UIView animateWithDuration:0.25 animations:^{
+            toast.alpha = 1;
+        } completion:^(BOOL finished) {
+            [UIView animateWithDuration:0.25 delay:2.5 options:0 animations:^{
+                toast.alpha = 0;
+            } completion:^(BOOL finished) {
+                [toast removeFromSuperview];
+                _isShowing = NO;
+                [self showNext];
+            }];
+        }];
+    } @catch (NSException *e) {
+        _isShowing = NO;
+        [self showNext];
+    }
+}
+@end
+
+// 便捷函数
+static void PKCPushToast(NSString *msg) {
+    [[PKCToastManager shared] pushMessage:msg];
+}
+
 #pragma mark - 新闻获取与解析
 
 @interface PKC60sNewsFetcher : NSObject
@@ -411,6 +549,7 @@ static dispatch_source_t pkcRetryTimer = nil;
     tryNextAPI = ^{
         if (currentIndex >= apiList.count) {
             // 8个API全部失败 → 30分钟后重试
+            PKCPushToast(@"⚠️ 所有API获取失败，30分钟后重试");
             NSLog(@"[PKC60sFix] All 8 APIs failed, will retry in 30 min");
 
             pkcPendingCompletion = localCompletion;
@@ -784,12 +923,16 @@ static dispatch_source_t pkcRetryTimer = nil;
 %hook WenAnAPIManager
 
 + (void)get60s:(id)completion {
+    PKCPushToast(@"📰 开始获取60秒新闻...");
     @try {
         [PKC60sNewsFetcher fetchNewsWithCompletion:^(NSString *newsText) {
             @try {
                 if (!newsText || newsText.length == 0) {
+                    PKCPushToast(@"⚠️ 新闻获取失败，使用备用内容");
                     NSString *dateHeader = PKC60sFormatDateHeader();
                     newsText = [NSString stringWithFormat:@"📰 每日60秒新闻\n%@在这里，每天60秒读懂世界\n\n抱歉，今日新闻获取失败，请稍后重试。\n\n📢 来源：60秒读懂世界", dateHeader.length > 0 ? [dateHeader stringByAppendingString:@"\n"] : @""];
+                } else {
+                    PKCPushToast(@"✅ 新闻获取成功");
                 }
 
                 NSLog(@"[PKC60sFix] News fetched, length=%lu, target=%@",
@@ -809,9 +952,11 @@ static dispatch_source_t pkcRetryTimer = nil;
                         pkcFindTargetAll();
                         NSLog(@"[PKC60sFix] Backup send check: target=%@", pkcTargetWxid ?: @"nil");
                         if (pkcTargetWxid && pkcTargetWxid.length > 0) {
+                            PKCPushToast([NSString stringWithFormat:@"📤 正在发送到 %@...", pkcTargetWxid]);
                             NSLog(@"[PKC60sFix] Backup direct send to %@", pkcTargetWxid);
                             pkcSendDirectly(newsText, pkcTargetWxid);
                         } else {
+                            PKCPushToast(@"❌ 未找到发送目标，请检查PKC设置");
                             NSLog(@"[PKC60sFix] Backup send aborted: no target found");
                         }
                     } @catch (NSException *e) {
@@ -1111,6 +1256,7 @@ static void pkcFindTargetAll(void) {
 static void pkcSendDirectly(NSString *newsText, NSString *target) {
     @try {
         if (!newsText || newsText.length == 0 || !target || target.length == 0) {
+            PKCPushToast(@"❌ 发送失败：内容或目标为空");
             NSLog(@"[PKC60sFix] Direct send skipped: text=%lu target=%@",
                   (unsigned long)(newsText ? newsText.length : 0), target ?: @"nil");
             return;
@@ -1120,6 +1266,7 @@ static void pkcSendDirectly(NSString *newsText, NSString *target) {
 
         id cMessageMgr = pkcGetCMessageMgr();
         if (!cMessageMgr) {
+            PKCPushToast(@"❌ 发送失败：CMessageMgr不可用");
             NSLog(@"[PKC60sFix] Cannot send: CMessageMgr not available");
             return;
         }
@@ -1128,12 +1275,14 @@ static void pkcSendDirectly(NSString *newsText, NSString *target) {
         Class wrapClass = NSClassFromString(@"CMessageWrap");
         if (!wrapClass) wrapClass = NSClassFromString(@"MessageWrap");
         if (!wrapClass) {
+            PKCPushToast(@"❌ 发送失败：CMessageWrap类不存在");
             NSLog(@"[PKC60sFix] Cannot send: CMessageWrap class not found");
             return;
         }
 
         id msgWrap = [[wrapClass alloc] init];
         if (!msgWrap) {
+            PKCPushToast(@"❌ 发送失败：无法创建消息对象");
             NSLog(@"[PKC60sFix] Cannot send: failed to create CMessageWrap");
             return;
         }
@@ -1150,6 +1299,7 @@ static void pkcSendDirectly(NSString *newsText, NSString *target) {
             NSLog(@"[PKC60sFix] Sending via CMessageMgr AddMsg:MsgWrap:");
             ((void(*)(id, SEL, id, id))objc_msgSend)(cMessageMgr, @selector(AddMsg:MsgWrap:), msgWrap, nil);
             NSLog(@"[PKC60sFix] Direct send completed via AddMsg:MsgWrap:");
+            PKCPushToast(@"✅ 发送成功(AddMsg)");
             return;
         }
 
@@ -1158,6 +1308,7 @@ static void pkcSendDirectly(NSString *newsText, NSString *target) {
             NSLog(@"[PKC60sFix] Sending via CMessageMgr sendMsg:");
             ((void(*)(id, SEL, id))objc_msgSend)(cMessageMgr, sendSel, msgWrap);
             NSLog(@"[PKC60sFix] Direct send completed via sendMsg:");
+            PKCPushToast(@"✅ 发送成功(sendMsg)");
             return;
         }
 
@@ -1166,11 +1317,14 @@ static void pkcSendDirectly(NSString *newsText, NSString *target) {
             NSLog(@"[PKC60sFix] Sending via CMessageMgr addMsg:");
             ((void(*)(id, SEL, id))objc_msgSend)(cMessageMgr, addSel, msgWrap);
             NSLog(@"[PKC60sFix] Direct send completed via addMsg:");
+            PKCPushToast(@"✅ 发送成功(addMsg)");
             return;
         }
 
+        PKCPushToast(@"❌ 发送失败：CMessageMgr无已知发送方法");
         NSLog(@"[PKC60sFix] CMessageMgr has no known send method");
     } @catch (NSException *e) {
+        PKCPushToast([NSString stringWithFormat:@"❌ 发送异常：%@", e.reason ?: @"unknown"]);
         NSLog(@"[PKC60sFix] Exception in direct send: %@", e);
     }
 }
@@ -1261,6 +1415,7 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
 
 %hook PWZfnvktqn
 - (void)send60s {
+    PKCPushToast(@"⏰ 定时触发：准备发送60秒新闻");
     NSLog(@"[PKC60sFix] send60s called");
     // 从 PKC 实例中提取目标 wxid
     pkcFindTargetInObject(self);

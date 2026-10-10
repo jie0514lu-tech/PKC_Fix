@@ -55,7 +55,14 @@ make package
 
 ## 版本历史
 
-### v3.6（当前版本）
+### v3.7（当前版本）
+- 新增Toast提示栈：黑色半透明背景(alpha 0.78)+白色字体+圆角12，每条显示2.5秒
+- 所有关键步骤都有Toast提示：定时触发/开始获取/获取成功/获取失败/正在发送/发送成功/发送失败原因
+- 提示系统设计为栈结构，任何模块调用PKCPushToast(@"消息")即可注入
+- 发送失败时显示具体原因：目标为空/CMessageMgr不可用/CMessageWrap不存在/无发送方法
+- 兼容iOS13+ UIScene和旧版keyWindow
+
+### v3.6
 - 新增NSUserDefaults全盘扫描目标wxid（PKC的目标很可能存在这里）
 - 新增PKC plist文件扫描目标wxid
 - pkcFindTargetInObject增强：扫描父类ivar+数组类型
