@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v4.2
+// PKC 60秒新闻修复插件 v4.3
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -55,27 +55,27 @@ static void pkcLoadTarget(void) {
 
 // === 多 API 源（按可靠性+更新速度排序） ===
 // 优先级说明：
-//   1. viki.moe text  — 主数据源，每天凌晨2-4点更新，text格式含完整日期/农历
-//   2. viki.moe JSON  — 同源JSON回退，有update时间戳可校验
-//   3. qqsuu.cn       — 通常镜像viki.moe，中等可靠
-//   4. oioweb.cn      — 有时延迟但通常可用
-//   5. auth.top       — 需key，中等可靠
-//   6. 03c3.cn        — 不稳定，有时宕机
-//   7. lbbb.cc/60s    — 原始PKC源，已知不可靠（超时/只返回标题）
-//   8. lbbb.cc/60miao — 最后兜底，通常只有标题
+//   1. viki.moe text(encoding=text) — 主数据源，返回预格式化文本（含日期/星期/农历/新闻/微语）
+//   2. viki.moe JSON                 — 同源JSON回退，有update时间戳可校验
+//   3. viki.moe 备用域名 b23.run     — Deno Deploy 备用
+//   4. viki.moe 备用域名 cf          — CF Workers 备用
+//   5. qqsuu.cn                      — 通常镜像viki.moe，中等可靠
+//   6. oioweb.cn                     — 有时延迟但通常可用
+//   7. 03c3.cn                       — 不稳定，有时宕机
+//   8. lbbb.cc/60s                   — 原始PKC源，已知不可靠
 static NSArray *PKC60sGetAPIList(void) {
     static NSArray *list = nil;
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
         list = @[
-            @"https://60s.viki.moe/v2/60s?format=text",
+            @"https://60s.viki.moe/v2/60s?encoding=text",
             @"https://60s.viki.moe/v2/60s",
+            @"https://60s.b23.run/v2/60s?encoding=text",
+            @"https://60s-api-cf.viki.moe/v2/60s?encoding=text",
             @"https://api.qqsuu.cn/api/dm-60s",
             @"https://api.oioweb.cn/api/common/60s",
-            @"https://api.auth.top/api/60s?format=json&key=9bf3ef53ef0060b5",
             @"https://api.03c3.cn/api/zb",
-            @"https://api.lbbb.cc/api/60s",
-            @"https://api.lbbb.cc/api/60miao"
+            @"https://api.lbbb.cc/api/60s"
         ];
     });
     return list;
@@ -1309,9 +1309,10 @@ static void pkcSendDirectly(NSString *newsText, NSString *target) {
         NSLog(@"[PKC60sFix] Created CMessageWrap, content length=%lu", (unsigned long)newsText.length);
 
         // 尝试多种发送方法
+        // 注意：AddMsg:MsgWrap: 的第二个参数才是 CMessageWrap
         if ([cMessageMgr respondsToSelector:@selector(AddMsg:MsgWrap:)]) {
             NSLog(@"[PKC60sFix] Sending via CMessageMgr AddMsg:MsgWrap:");
-            ((void(*)(id, SEL, id, id))objc_msgSend)(cMessageMgr, @selector(AddMsg:MsgWrap:), msgWrap, nil);
+            ((void(*)(id, SEL, id, id))objc_msgSend)(cMessageMgr, @selector(AddMsg:MsgWrap:), nil, msgWrap);
             NSLog(@"[PKC60sFix] Direct send completed via AddMsg:MsgWrap:");
             PKCPushToast(@"✅ 发送成功(AddMsg)");
             return;
@@ -1362,12 +1363,12 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
             }
         } @catch (NSException *e) {}
 
-        // 方式1：通过 CMessageMgr AddMsg:MsgWrap:
+        // 方式1：通过 CMessageMgr AddMsg:MsgWrap:（第二个参数才是 CMessageWrap）
         id cMessageMgr = pkcGetCMessageMgr();
         if (cMessageMgr) {
             if ([cMessageMgr respondsToSelector:@selector(AddMsg:MsgWrap:)]) {
                 NSLog(@"[PKC60sFix] Forwarding via CMessageMgr AddMsg:MsgWrap:");
-                ((void(*)(id, SEL, id, id))objc_msgSend)(cMessageMgr, @selector(AddMsg:MsgWrap:), msgWrap, nil);
+                ((void(*)(id, SEL, id, id))objc_msgSend)(cMessageMgr, @selector(AddMsg:MsgWrap:), nil, msgWrap);
                 return;
             }
             // 尝试 sendMsg:
@@ -1379,11 +1380,11 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
             }
         }
 
-        // 方式2：通过 OnAddMsg:MsgWrap:
+        // 方式2：通过 OnAddMsg:MsgWrap:（第二个参数才是 CMessageWrap）
         id selfId = self;
         if ([selfId respondsToSelector:@selector(OnAddMsg:MsgWrap:)]) {
             NSLog(@"[PKC60sFix] Forwarding via OnAddMsg:MsgWrap:");
-            ((void(*)(id, SEL, id, id))objc_msgSend)(self, @selector(OnAddMsg:MsgWrap:), msgWrap, nil);
+            ((void(*)(id, SEL, id, id))objc_msgSend)(self, @selector(OnAddMsg:MsgWrap:), nil, msgWrap);
             return;
         }
 

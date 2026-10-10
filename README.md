@@ -55,7 +55,18 @@ make package
 
 ## 版本历史
 
-### v4.1（当前版本）
+### v4.3（当前版本）
+- 修复API参数错误：`format=text` → `encoding=text`（用错参数服务器返回JSON导致乱码）
+- 新增viki.moe备用域名：60s.b23.run、60s-api-cf.viki.moe
+- 修复AddMsg:MsgWrap:参数顺序错误：第二个参数才是CMessageWrap（之前传反了导致发送失败）
+- pkcSendDirectly和pkc_forwardAddMsg两处都修复了参数顺序
+
+### v4.2
+- 修复启动闪退：移除CMessageMgr SendMessage:/sendMsg: hook
+- 递归扫描跳过UIKit对象避免触碰已释放对象
+- pkcFindTargetFromCurrentVC改为只尝试已知属性
+
+### v4.1
 - 精简目标查找：删除慢速的NSUserDefaults全盘扫描和plist扫描
 - 新增UIViewController viewWillDisappear hook：捕捉用户选择群聊/好友时的目标
 - 选择器页面消失后0.5秒扫描PKC单例，获取用户选中的wxid
