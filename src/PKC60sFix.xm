@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v4.1
+// PKC 60秒新闻修复插件 v4.2
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -1113,6 +1113,15 @@ static void pkcScanObjectRecursive(id obj, NSInteger depth, NSMutableSet *visite
         if ([visited containsObject:obj]) return;
         [visited addObject:obj];
 
+        // 跳过 UIKit 对象（UIView/UIViewController/CALayer 等 ivar 太多，扫描危险）
+        if ([obj isKindOfClass:[UIView class]] ||
+            [obj isKindOfClass:[UIViewController class]] ||
+            [obj isKindOfClass:[CALayer class]] ||
+            [obj isKindOfClass:[UIImage class]] ||
+            [obj isKindOfClass:[NSData class]]) {
+            return;
+        }
+
         // 如果是字符串，检查是否是 wxid
         if ([obj isKindOfClass:[NSString class]]) {
             NSString *str = (NSString *)obj;
@@ -1137,6 +1146,15 @@ static void pkcScanObjectRecursive(id obj, NSInteger depth, NSMutableSet *visite
         if ([obj isKindOfClass:[NSDictionary class]]) {
             for (id val in [(NSDictionary *)obj allValues]) {
                 pkcScanObjectRecursive(val, depth + 1, visited);
+                if (pkcTargetWxid.length > 0) return;
+            }
+            return;
+        }
+
+        // 如果是集合，遍历所有元素
+        if ([obj isKindOfClass:[NSSet class]]) {
+            for (id item in (NSSet *)obj) {
+                pkcScanObjectRecursive(item, depth + 1, visited);
                 if (pkcTargetWxid.length > 0) return;
             }
             return;
@@ -1167,12 +1185,11 @@ static void pkcScanObjectRecursive(id obj, NSInteger depth, NSMutableSet *visite
 }
 
 // 从当前聊天界面获取目标 wxid
-// 遍历 UIViewController 栈，找聊天控制器的 m_nsChatName / m_contact / session 等属性
+// 从当前聊天界面获取目标 wxid（安全版：只尝试已知属性，不全量扫描）
 static void pkcFindTargetFromCurrentVC(void) {
     @try {
         UIViewController *topVC = nil;
 
-        // 获取最顶层的 ViewController
         UIWindow *window = [[UIApplication sharedApplication] keyWindow];
         if (!window) {
             NSArray *windows = [[UIApplication sharedApplication] windows];
@@ -1186,24 +1203,14 @@ static void pkcFindTargetFromCurrentVC(void) {
         while (topVC.presentedViewController) {
             topVC = topVC.presentedViewController;
         }
-
-        // 如果是 navigation controller，取 topViewController
         if ([topVC isKindOfClass:[UINavigationController class]]) {
             topVC = [(UINavigationController *)topVC topViewController];
         }
-
         if (!topVC) return;
 
         NSLog(@"[PKC60sFix] Current VC: %@", NSStringFromClass([topVC class]));
 
-        // 递归扫描当前 VC 的 ivar，找 wxid
-        pkcScanObjectRecursive(topVC, 0, [NSMutableSet set]);
-        if (pkcTargetWxid.length > 0) {
-            NSLog(@"[PKC60sFix] Found target from current VC: %@", pkcTargetWxid);
-            return;
-        }
-
-        // 尝试常见的聊天控制器属性
+        // 只尝试常见的聊天控制器属性，不递归扫描（避免触碰已释放对象）
         NSArray *chatProps = @[@"m_nsChatName", @"m_contact", @"m_nsToUsr",
                               @"chatName", @"toUser", @"session", @"m_session"];
         for (NSString *prop in chatProps) {
@@ -1417,15 +1424,16 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
 - (void)viewWillDisappear:(BOOL)animated {
     @try {
         NSString *clsName = NSStringFromClass([self class]);
-        // 只处理联系人/群聊选择器
-        if ([clsName containsString:@"Picker"] || [clsName containsString:@"Select"] ||
-            [clsName containsString:@"Contact"] || [clsName containsString:@"Chat"] ||
-            [clsName containsString:@"Room"]) {
+        // 只处理联系人/群聊选择器（限定关键词，避免误触发）
+        if ([clsName containsString:@"Picker"] || [clsName containsString:@"SelectContact"] ||
+            [clsName containsString:@"ContactPicker"] || [clsName containsString:@"MultiSelect"]) {
             NSLog(@"[PKC60sFix] Picker disappeared: %@, scanning for target", clsName);
             // 延迟0.5秒让PKC保存选择结果
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)),
                            dispatch_get_main_queue(), ^{
-                pkcFindTargetAll();
+                @try {
+                    pkcFindTargetAll();
+                } @catch (NSException *e) {}
             });
         }
     } @catch (NSException *e) {}
@@ -1462,6 +1470,7 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
 
 // === CMessageMgr 诊断 hook（仅日志，不修改行为） ===
 // 用于确认 PKC 是否真的调用了 CMessageMgr 的发送方法，并捕获目标 wxid
+// CMessageMgr 诊断 hook（仅 AddMsg:MsgWrap:，其他方法签名不确定，不hook避免崩溃）
 %hook CMessageMgr
 - (void)AddMsg:(id)arg1 MsgWrap:(id)arg2 {
     @try {
@@ -1469,24 +1478,6 @@ static void pkc_forwardAddMsg(id self, SEL _cmd, id msgWrap, id msgWrap2) {
         NSString *content = [arg2 valueForKey:@"m_nsContent"];
         NSLog(@"[PKC60sFix] CMessageMgr AddMsg:MsgWrap: called, to=%@ contentLen=%lu",
               toUsr ?: @"nil", (unsigned long)(content ? content.length : 0));
-        if (toUsr.length > 0) pkcSetTarget(toUsr);
-    } @catch (NSException *e) {}
-    %orig;
-}
-
-- (void)SendMessage:(id)arg1 {
-    @try {
-        NSString *toUsr = [arg1 valueForKey:@"m_nsToUsr"];
-        NSLog(@"[PKC60sFix] CMessageMgr SendMessage: called, to=%@", toUsr ?: @"nil");
-        if (toUsr.length > 0) pkcSetTarget(toUsr);
-    } @catch (NSException *e) {}
-    %orig;
-}
-
-- (void)sendMsg:(id)arg1 {
-    @try {
-        NSString *toUsr = [arg1 valueForKey:@"m_nsToUsr"];
-        NSLog(@"[PKC60sFix] CMessageMgr sendMsg: called, to=%@", toUsr ?: @"nil");
         if (toUsr.length > 0) pkcSetTarget(toUsr);
     } @catch (NSException *e) {}
     %orig;
