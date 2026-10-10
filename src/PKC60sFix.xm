@@ -3,7 +3,7 @@
 #import <objc/message.h>
 #import <objc/runtime.h>
 
-// PKC 60秒新闻修复插件 v3.4
+// PKC 60秒新闻修复插件 v3.5
 // 仅修复两个问题，不修改 PKC 其他任何功能：
 //
 // 问题1：60秒新闻只发送标题/空白/乱码
@@ -458,7 +458,8 @@ static dispatch_source_t pkcRetryTimer = nil;
                 NSDictionary *json = nil;
                 @try { json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil]; } @catch (NSException *e) {}
 
-                if (!isTextAPI && json) {
+                // 只要有 JSON 就检查新鲜度（text API 也可能返回 JSON）
+                if (json) {
                     if (!PKC60sIsNewsFresh(nil, json)) {
                         NSLog(@"[PKC60sFix] API#%ld %@ stale JSON date", (long)(currentIndex-1), urlString);
                         tryNextAPI();
@@ -473,8 +474,9 @@ static dispatch_source_t pkcRetryTimer = nil;
                     return;
                 }
 
-                if (isTextAPI) {
-                    if (!PKC60sIsNewsFresh(newsText, json)) {
+                // 如果没有 JSON（纯文本响应），用文本检查新鲜度
+                if (!json) {
+                    if (!PKC60sIsNewsFresh(newsText, nil)) {
                         NSLog(@"[PKC60sFix] API#%ld %@ stale text", (long)(currentIndex-1), urlString);
                         tryNextAPI();
                         return;
@@ -519,28 +521,7 @@ static dispatch_source_t pkcRetryTimer = nil;
 + (NSString *)parseNewsData:(NSData *)data isTextAPI:(BOOL)isTextAPI {
     if (!data || data.length == 0) return nil;
 
-    // text 格式 API：直接返回文本（已包含日期/星期/农历/新闻/微语/来源）
-    if (isTextAPI) {
-        NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-        if (!text) {
-            text = [[NSString alloc] initWithData:data encoding:CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000)];
-        }
-        if (!text) return nil;
-
-        text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
-
-        // 过滤 HTML 响应
-        if ([text hasPrefix:@"<"] || [text hasSuffix:@">"]) return nil;
-        if (text.length < 20) return nil;
-
-        // 验证是有效的新闻文本（包含数字编号的新闻条目）
-        if ([text containsString:@"."] || [text containsString:@"、"] || [text containsString:@"："] || text.length > 50) {
-            return text;
-        }
-        return nil;
-    }
-
-    // JSON 格式 API
+    // 先尝试解析为 JSON（有些 "text" 格式 API 实际返回 JSON）
     NSDictionary *json = nil;
     @try {
         json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
@@ -548,11 +529,15 @@ static dispatch_source_t pkcRetryTimer = nil;
         json = nil;
     }
 
+    // 如果是有效的 JSON，无论是否声明为 text API，都用 parseJSON 解析
     if ([json isKindOfClass:[NSDictionary class]]) {
-        return [self parseJSON:json];
+        NSString *parsed = [self parseJSON:json];
+        if (parsed.length > 0) {
+            return parsed;
+        }
     }
 
-    // 纯文本回退
+    // 不是 JSON，按纯文本处理
     NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (!text) {
         text = [[NSString alloc] initWithData:data encoding:CFStringConvertEncodingToNSStringEncoding(kCFStringEncodingGB_18030_2000)];
@@ -560,10 +545,20 @@ static dispatch_source_t pkcRetryTimer = nil;
     if (!text) return nil;
 
     text = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+    // 过滤 HTML 响应
     if ([text hasPrefix:@"<"] || [text hasSuffix:@">"]) return nil;
+
+    // 过滤 JSON 字符串（防止把原始 JSON 当新闻发送）
+    if ([text hasPrefix:@"{"] || [text hasPrefix:@"["]) return nil;
+
     if (text.length < 20) return nil;
 
-    return text;
+    // 验证是有效的新闻文本（包含数字编号的新闻条目或日期）
+    if ([text containsString:@"."] || [text containsString:@"、"] || [text containsString:@"："] || text.length > 50) {
+        return text;
+    }
+    return nil;
 }
 
 // 解析 JSON 格式的新闻，组装完整格式
@@ -659,7 +654,7 @@ static dispatch_source_t pkcRetryTimer = nil;
     // 组装新闻文本
     NSMutableString *result = [NSMutableString string];
 
-    // 日期头：优先使用 API 返回的日期，避免用今天的日期配上昨天的新闻
+    // 日期头：优先使用 API 返回的日期+星期+农历
     NSString *apiDate = nil;
     for (NSString *key in @[@"date", @"update", @"create_time", @"datetime"]) {
         id val = searchDict[key];
@@ -668,9 +663,34 @@ static dispatch_source_t pkcRetryTimer = nil;
             break;
         }
     }
+    // 星期和农历（viki.moe 等 API 提供）
+    NSString *weekDay = nil;
+    for (NSString *key in @[@"day_of_week", @"weekday", @"week", @"星期"]) {
+        id val = searchDict[key];
+        if ([val isKindOfClass:[NSString class]] && [val length] > 0) {
+            weekDay = val;
+            break;
+        }
+    }
+    NSString *lunarDate = nil;
+    for (NSString *key in @[@"lunar_date", @"lunar", @"农历"]) {
+        id val = searchDict[key];
+        if ([val isKindOfClass:[NSString class]] && [val length] > 0) {
+            lunarDate = val;
+            break;
+        }
+    }
+
     if (apiDate.length > 0) {
-        // 使用 API 的日期（可能需要格式化）
-        [result appendFormat:@"%@\n", [self cleanText:apiDate]];
+        // 使用 API 的日期，拼接星期和农历
+        NSMutableString *dateHeader = [NSMutableString stringWithString:[self cleanText:apiDate]];
+        if (weekDay.length > 0) {
+            [dateHeader appendFormat:@" %@", [self cleanText:weekDay]];
+        }
+        if (lunarDate.length > 0) {
+            [dateHeader appendFormat:@" %@", [self cleanText:lunarDate]];
+        }
+        [result appendFormat:@"%@\n", dateHeader];
     } else {
         // API 没有日期字段，用本地生成的日期
         NSString *dateHeader = PKC60sFormatDateHeader();

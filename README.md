@@ -55,7 +55,14 @@ make package
 
 ## 版本历史
 
-### v3.4（当前版本）
+### v3.5（当前版本）
+- 修复：text格式API（viki.moe?format=text）实际返回JSON时，原代码把JSON当文本直接发送
+- parseNewsData改为优先尝试JSON解析，只有非JSON才按纯文本处理
+- 增加JSON字符串过滤：以{或[开头的文本直接拒绝，防止发送原始JSON
+- parseJSON增加day_of_week和lunar_date字段，日期头显示"2026-10-10 星期六 丙午年九月初一"
+- 新鲜度检查改为：只要响应是JSON就检查JSON日期，不再区分text/JSON API
+
+### v3.4
 - API逻辑重构：8个API立即切换下一个，不再"失败3次跳过30分钟"
 - 8个API全部失败才等30分钟重试，成功1次当天停止获取
 - 成功后当天不再重复获取，直到第二天设定时间才触发
