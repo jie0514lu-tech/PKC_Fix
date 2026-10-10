@@ -55,7 +55,14 @@ make package
 
 ## 版本历史
 
-### v4.0（当前版本）
+### v4.1（当前版本）
+- 精简目标查找：删除慢速的NSUserDefaults全盘扫描和plist扫描
+- 新增UIViewController viewWillDisappear hook：捕捉用户选择群聊/好友时的目标
+- 选择器页面消失后0.5秒扫描PKC单例，获取用户选中的wxid
+- 保留快速查找：PKC单例递归扫描 + 当前聊天VC扫描
+- 代码更简洁，不卡顿不闪退
+
+### v4.0
 - 新增第4种目标查找方式：从当前聊天界面获取wxid
 - 如果用户在聊天页点击测试，直接用当前聊天对象作为目标
 - 遍历UIViewController栈，递归扫描ivar+尝试常见聊天属性(m_nsChatName/m_contact/session等)
