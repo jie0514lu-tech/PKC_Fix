@@ -53,16 +53,14 @@ static void pkcLoadTarget(void) {
     } @catch (NSException *e) {}
 }
 
-// === 多 API 源（按可靠性+更新速度排序） ===
+// === 多 API 源（全部使用 viki.moe 同源域名，格式统一不会乱码） ===
 // 优先级说明：
-//   1. viki.moe text(encoding=text) — 主数据源，返回预格式化文本（含日期/星期/农历/新闻/微语）
-//   2. viki.moe JSON                 — 同源JSON回退，有update时间戳可校验
-//   3. viki.moe 备用域名 b23.run     — Deno Deploy 备用
-//   4. viki.moe 备用域名 cf          — CF Workers 备用
-//   5. qqsuu.cn                      — 通常镜像viki.moe，中等可靠
-//   6. oioweb.cn                     — 有时延迟但通常可用
-//   7. 03c3.cn                       — 不稳定，有时宕机
-//   8. lbbb.cc/60s                   — 原始PKC源，已知不可靠
+//   1. 主域名 viki.moe        — 每天凌晨2-4点更新
+//   2. 备用1 b23.run          — Deno Deploy
+//   3. 备用2 60s-api-cf.viki  — CF Workers
+//   4. 备用3 114128.xyz       — Deno Deploy
+//   5. 备用4 60s-api-cf.114128 — CF Workers
+// 每个域名先试 text 格式（预格式化文本），再试 JSON 格式（回退解析）
 static NSArray *PKC60sGetAPIList(void) {
     static NSArray *list = nil;
     static dispatch_once_t onceToken;
@@ -71,11 +69,11 @@ static NSArray *PKC60sGetAPIList(void) {
             @"https://60s.viki.moe/v2/60s?encoding=text",
             @"https://60s.viki.moe/v2/60s",
             @"https://60s.b23.run/v2/60s?encoding=text",
+            @"https://60s.b23.run/v2/60s",
             @"https://60s-api-cf.viki.moe/v2/60s?encoding=text",
-            @"https://api.qqsuu.cn/api/dm-60s",
-            @"https://api.oioweb.cn/api/common/60s",
-            @"https://api.03c3.cn/api/zb",
-            @"https://api.lbbb.cc/api/60s"
+            @"https://60s-api-cf.viki.moe/v2/60s",
+            @"https://60s-api.114128.xyz/v2/60s?encoding=text",
+            @"https://60s-api-cf.114128.xyz/v2/60s?encoding=text"
         ];
     });
     return list;
